@@ -78,6 +78,8 @@ jobs:
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -m pytest tests/test_recuperacao_wheel.py -q
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
+        run: python -m pytest tests/test_win_credentials_wheel.py -q
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -m pytest tests/test_win_move_wheel.py -q
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -I scripts/smoke-windows-move.py

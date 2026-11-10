@@ -113,6 +113,67 @@ def test_falha_de_gravacao_remove_credencial_nova_incompleta(tmp_path, monkeypat
     with pytest.raises(OSError, match='gravar a credencial'):
         win_credentials.gravar(arquivo, b'credencial-ficticia')
     assert not arquivo.exists()
+    journal = arquivo.with_name(arquivo.name + '.passe1-cred-journal')
+    assert journal.exists()
+    with pytest.raises(ValueError, match='confirmação'):
+        win_credentials.recuperar(arquivo)
+    win_credentials.recuperar(arquivo, confirmado=True)
+    assert not journal.exists()
+
+
+def test_falha_de_overwrite_restaura_credencial_anterior(tmp_path, monkeypatch):
+    from passe1_engine import win_credentials
+
+    arquivo = tmp_path / 'session'
+    win_credentials.gravar(arquivo, b'credencial-anterior')
+    escrever = win_credentials._gravar_handle
+    chamadas = []
+
+    def falhar_uma_vez(kernel, handle, dados):
+        chamadas.append(1)
+        if len(chamadas) == 1:
+            escrever(kernel, handle, b'parcial')
+            raise OSError('falha simulada')
+        return escrever(kernel, handle, dados)
+
+    monkeypatch.setattr(win_credentials, '_gravar_handle', falhar_uma_vez)
+    with pytest.raises(OSError, match='estado anterior restaurado'):
+        win_credentials.gravar(arquivo, b'credencial-nova')
+    assert win_credentials.ler(arquivo) == b'credencial-anterior'
+    assert not arquivo.with_name(arquivo.name + '.passe1-cred-journal').exists()
+
+
+@pytest.mark.parametrize('existente', [False, True])
+def test_queda_em_gravacao_exige_recovery_e_preserva_estado_anterior(tmp_path, existente):
+    import sys
+
+    from passe1_engine import win_credentials
+
+    arquivo = tmp_path / 'key'
+    if existente:
+        win_credentials.gravar(arquivo, b'credencial-anterior')
+    programa = '''
+import os, sys
+from passe1_engine import win_credentials
+original = win_credentials._gravar_handle
+def interromper(kernel, handle, dados):
+    original(kernel, handle, b'parcial')
+    os._exit(91)
+win_credentials._gravar_handle = interromper
+win_credentials.gravar(sys.argv[1], b'credencial-nova')
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(arquivo)], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    with pytest.raises(win_credentials.RecoveryPendente):
+        win_credentials.ler(arquivo)
+    with pytest.raises(ValueError, match='confirmação'):
+        win_credentials.recuperar(arquivo)
+    win_credentials.recuperar(arquivo, confirmado=True)
+    if existente:
+        assert win_credentials.ler(arquivo) == b'credencial-anterior'
+    else:
+        assert not arquivo.exists()
+    assert not arquivo.with_name(arquivo.name + '.passe1-cred-journal').exists()
 
 
 def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch):

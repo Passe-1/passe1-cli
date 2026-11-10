@@ -61,6 +61,8 @@ def _ler_config_privado(caminho: Path) -> str:
         from passe1_engine import win_credentials
         try:
             return win_credentials.ler(caminho).decode("utf-8")
+        except win_credentials.RecoveryPendente as exc:
+            raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
         except ValueError as exc:
             raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
     return caminho.read_text(encoding="utf-8")
@@ -71,6 +73,8 @@ def _gravar_config_privado(caminho: Path, texto: str) -> None:
         from passe1_engine import win_credentials
         try:
             win_credentials.gravar(caminho, texto.encode("utf-8"))
+        except win_credentials.RecoveryPendente as exc:
+            raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
         except ValueError as exc:
             raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
         return
@@ -1107,6 +1111,37 @@ def cmd_recover(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_recover_credential(args: argparse.Namespace) -> int:
+    """Recupera credencial Windows interrompida, com confirmação local."""
+    if os.name != "nt":
+        print("Recuperação de credenciais disponível somente no Windows.")
+        return 1
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("A recuperação de credencial exige um terminal interativo.")
+        return 1
+    caminho = Path(os.path.abspath(args.caminho))
+    raiz = _dir_config()
+    permitidos = [raiz / "key", raiz / "session", raiz / "key-session", raiz / "opencode" / "data" / "opencode" / "auth.json"]
+    if os.path.normcase(str(caminho)) not in {os.path.normcase(os.path.abspath(p)) for p in permitidos}:
+        print("Caminho não corresponde a uma credencial do Passe1.")
+        return 1
+    print("Recuperar credencial local: " + _terminal_seguro(str(caminho)).replace("\n", r"\n"))
+    try:
+        if input("Confirmar recuperação? [s/N] ").strip().lower() not in {"s", "sim"}:
+            print("Recuperação cancelada.")
+            return 1
+        from passe1_engine.win_credentials import recuperar
+        recuperar(caminho, confirmado=True)
+    except (EOFError, KeyboardInterrupt):
+        print("Recuperação cancelada.")
+        return 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        print("Recuperação recusada; dados preservados: " + _terminal_seguro(str(exc)).replace("\n", r"\n"))
+        return 1
+    print("Credencial recuperada.")
+    return 0
+
+
 def cmd_recover_move(args: argparse.Namespace) -> int:
     """Permite revisão local explícita antes de recuperar uma movimentação."""
     if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -1252,6 +1287,10 @@ def montar_parser() -> argparse.ArgumentParser:
     p_recover = sub.add_parser("recover", help="Recuperar uma edição Windows interrompida.")
     p_recover.add_argument("caminho", help="Arquivo cuja edição foi interrompida.")
     p_recover.set_defaults(func=cmd_recover)
+
+    p_recover_credential = sub.add_parser("recover-credential", help="Recuperar credencial Windows após interrupção.")
+    p_recover_credential.add_argument("caminho", help="Caminho da credencial indicada pelo CLI.")
+    p_recover_credential.set_defaults(func=cmd_recover_credential)
 
     p_recover_move = sub.add_parser("recover-move", help="Revisar e recuperar uma movimentação interrompida.")
     p_recover_move.add_argument("journal", help="Diretório do journal da movimentação.")
