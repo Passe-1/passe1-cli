@@ -59,6 +59,8 @@ jobs:
       - if: runner.os == 'Windows'
         run: python scripts/smoke-windows-exec.py
       - run: python scripts/smoke-engine.py
+      - if: runner.os != 'Windows'
+        run: python -I scripts/smoke-server-watchdog.py
       - run: python -I scripts/smoke-installed-pty.py
       - run: python scripts/smoke-secure-grep.py
       - run: python scripts/smoke-image-integrity.py
