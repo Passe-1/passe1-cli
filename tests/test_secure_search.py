@@ -103,3 +103,25 @@ def test_regex_invalida_retorna_erro(tmp_path):
     arquivo.write_text('conteudo')
     with pytest.raises(ValueError, match='expressão'):
         secure_search.buscar_candidatos('[', [str(arquivo)], ripgrep)
+
+
+def test_regex_invalida_no_fechamento_do_pipe_retorna_erro(tmp_path, monkeypatch):
+    import io
+    import subprocess
+    arquivo = tmp_path / 'publico.txt'
+    arquivo.write_text('conteudo')
+    class Entrada(io.BytesIO):
+        def close(self):
+            super().close()
+            raise BrokenPipeError('ripgrep encerrou')
+    class Processo:
+        def __init__(self, *args, **kwargs):
+            self.stdin = Entrada()
+            self.stdout = io.BytesIO()
+        def wait(self):
+            return 2
+        def poll(self):
+            return 2
+    monkeypatch.setattr(subprocess, 'Popen', Processo)
+    with pytest.raises(ValueError, match='expressão'):
+        secure_search.buscar_candidatos('[', [str(arquivo)], 'rg')

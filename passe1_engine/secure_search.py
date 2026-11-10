@@ -97,7 +97,14 @@ def buscar_candidatos(padrao, caminhos, ripgrep, limite=100):
                 continue
             except ValueError:
                 continue
-            processo.stdin.close()
+            try:
+                processo.stdin.close()
+            except BrokenPipeError:
+                codigo = processo.wait()
+                leitor.join()
+                if codigo not in (0, 1):
+                    raise ValueError('Ripgrep recusou a expressão de busca.')
+                continue
             codigo = processo.wait()
             leitor.join()
             if erros or codigo not in (0, 1):
