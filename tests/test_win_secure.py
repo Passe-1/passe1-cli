@@ -72,10 +72,15 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
     temporario.write_text('depois', encoding='utf-8')
     invalido = wintypes.HANDLE(-1).value
     diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
-    original = kernel.CreateFileW(str(destino), 0x80000000, 5, None, 3, 0, None)
+    original = kernel.CreateFileW(str(destino), 0xC0000000, 7, None, 3, 0, None)
     novo = kernel.CreateFileW(str(temporario), 0x10000, 7, None, 3, 0, None)
     try:
         assert all(h != invalido for h in (diretorio, original, novo))
+        class Overlapped(ctypes.Structure):
+            _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t), ('Offset', wintypes.DWORD), ('OffsetHigh', wintypes.DWORD), ('hEvent', wintypes.HANDLE)]
+        kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+        bloqueio = Overlapped()
+        assert kernel.LockFileEx(original, 3, 0, 0xffffffff, 0xffffffff, ctypes.byref(bloqueio)), f'LockFileEx falhou: {ctypes.get_last_error()}'
         nome = destino.name
         class RenameInfo(ctypes.Structure):
             _fields_ = [('Flags', wintypes.DWORD), ('RootDirectory', wintypes.HANDLE), ('FileNameLength', wintypes.DWORD), ('FileName', wintypes.WCHAR * len(nome))]
@@ -122,7 +127,7 @@ def test_diretorio_bloqueado_impede_troca_do_alvo(tmp_path):
     alvo.write_text('original', encoding='utf-8')
     invalido = wintypes.HANDLE(-1).value
     diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
-    arquivo = kernel.CreateFileW(str(alvo), 0x80000000, 5, None, 3, 0, None)
+    arquivo = kernel.CreateFileW(str(alvo), 0x80000000, 7, None, 3, 0, None)
     try:
         assert diretorio != invalido and arquivo != invalido
         with pytest.raises(OSError):
@@ -131,3 +136,33 @@ def test_diretorio_bloqueado_impede_troca_do_alvo(tmp_path):
         for handle in (arquivo, diretorio):
             if handle != invalido:
                 kernel.CloseHandle(handle)
+
+
+def test_trava_exclusiva_impede_escrita_concorrente(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    class Overlapped(ctypes.Structure):
+        _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t), ('Offset', wintypes.DWORD), ('OffsetHigh', wintypes.DWORD), ('hEvent', wintypes.HANDLE)]
+    kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
+    alvo = tmp_path / 'alvo.txt'
+    alvo.write_text('original', encoding='utf-8')
+    invalido = wintypes.HANDLE(-1).value
+    primeiro = kernel.CreateFileW(str(alvo), 0xC0000000, 7, None, 3, 0, None)
+    segundo = kernel.CreateFileW(str(alvo), 0x40000000, 7, None, 3, 0, None)
+    try:
+        assert primeiro != invalido and segundo != invalido
+        bloqueio = Overlapped()
+        assert kernel.LockFileEx(primeiro, 3, 0, 0xffffffff, 0xffffffff, ctypes.byref(bloqueio))
+        dados = ctypes.create_string_buffer(b'x')
+        escritos = wintypes.DWORD()
+        assert not kernel.WriteFile(segundo, dados, 1, ctypes.byref(escritos), None)
+    finally:
+        for handle in (segundo, primeiro):
+            if handle != invalido:
+                kernel.CloseHandle(handle)
+    assert alvo.read_text(encoding='utf-8') == 'original'

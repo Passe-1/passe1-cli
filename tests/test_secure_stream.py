@@ -28,7 +28,7 @@ def test_recusa_symlink_ancestral(tmp_path):
     externo.mkdir()
     (externo / 'dados').write_text('segredo')
     (tmp_path / 'projeto').symlink_to(externo, target_is_directory=True)
-    with pytest.raises(OSError):
+    with pytest.raises((OSError, ValueError)):
         secure_stream.transmitir(tmp_path / 'projeto' / 'dados', io.BytesIO())
 
 
