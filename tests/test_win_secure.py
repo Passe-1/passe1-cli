@@ -166,3 +166,56 @@ def test_trava_exclusiva_impede_escrita_concorrente(tmp_path):
             if handle != invalido:
                 kernel.CloseHandle(handle)
     assert alvo.read_text(encoding='utf-8') == 'original'
+
+
+def test_oplock_sinaliza_troca_antes_de_permitir_rename(tmp_path):
+    """Oplock retém uma tentativa concorrente até o handle ser fechado."""
+    import ctypes
+    import threading
+    from ctypes import wintypes
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k.CreateFileW.restype = wintypes.HANDLE
+    k.CreateEventW.argtypes = [ctypes.c_void_p, wintypes.BOOL, wintypes.BOOL, wintypes.LPCWSTR]
+    k.CreateEventW.restype = wintypes.HANDLE
+    k.CloseHandle.argtypes = [wintypes.HANDLE]
+    k.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    class Overlapped(ctypes.Structure):
+        _fields_ = [('Internal', ctypes.c_size_t), ('InternalHigh', ctypes.c_size_t), ('Offset', wintypes.DWORD), ('OffsetHigh', wintypes.DWORD), ('hEvent', wintypes.HANDLE)]
+    class Request(ctypes.Structure):
+        _fields_ = [('version', wintypes.WORD), ('length', wintypes.WORD), ('level', wintypes.DWORD), ('flags', wintypes.DWORD)]
+    class Response(ctypes.Structure):
+        _fields_ = [('version', wintypes.WORD), ('length', wintypes.WORD), ('original', wintypes.DWORD), ('new', wintypes.DWORD), ('flags', wintypes.DWORD), ('access', wintypes.DWORD), ('share', wintypes.WORD)]
+    k.DeviceIoControl.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.POINTER(Overlapped)]
+    alvo = tmp_path / 'oplock.txt'
+    destino = tmp_path / 'mudou.txt'
+    alvo.write_text('original', encoding='utf-8')
+    evento = k.CreateEventW(None, True, False, None)
+    arquivo = k.CreateFileW(str(alvo), 0x80000000, 7, None, 3, 0x40040000, None)
+    invalido = wintypes.HANDLE(-1).value
+    assert evento and arquivo != invalido
+    tentativa = None
+    try:
+        entrada = Request(1, ctypes.sizeof(Request), 7, 1)
+        saida = Response()
+        io = Overlapped()
+        io.hEvent = evento
+        resultado = k.DeviceIoControl(arquivo, 0x90240, ctypes.byref(entrada), ctypes.sizeof(entrada), ctypes.byref(saida), ctypes.sizeof(saida), None, ctypes.byref(io))
+        assert not resultado and ctypes.get_last_error() == 997, f'oplock não concedido: {ctypes.get_last_error()}'
+        estado = []
+        def trocar():
+            try:
+                os.rename(alvo, destino)
+                estado.append('renomeou')
+            except OSError:
+                estado.append('recusou')
+        tentativa = threading.Thread(target=trocar, daemon=True)
+        tentativa.start()
+        assert k.WaitForSingleObject(evento, 3000) == 0, 'tentativa não notificou quebra do oplock'
+        assert alvo.exists() and not destino.exists()
+    finally:
+        k.CloseHandle(arquivo)
+        if tentativa is not None:
+            tentativa.join(timeout=5)
+        k.CloseHandle(evento)
+    assert tentativa is not None and not tentativa.is_alive()
