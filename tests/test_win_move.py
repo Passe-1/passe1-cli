@@ -32,6 +32,32 @@ def test_limite_de_conteudo_e_explicito(monkeypatch):
         win_move._digest(None)
 
 
+@pytest.mark.parametrize(('anterior', 'novo', 'atual', 'esperado'), [
+    (b'abcdef', b'XYZ', b'abcdef', True),
+    (b'abcdef', b'XYZ', b'XYcdef', True),
+    (b'abcdef', b'XYZ', b'XYZdef', True),
+    (b'abcdef', b'XYZ', b'XYZ', True),
+    (b'abc', b'UVWXYZ', b'UVc', True),
+    (b'abc', b'UVWXYZ', b'UVWX', True),
+    (b'abcdef', b'XYZ', b'XbcZef', False),
+    (b'abcdef', b'XYZ', b'XY', False),
+    (b'abc', b'UVWXYZ', b'UVxq', False),
+])
+def test_reconhece_somente_escrita_sequencial_possivelmente_interrompida(anterior, novo, atual, esperado):
+    assert win_move._escrita_interrompida(anterior, novo, atual) is esperado
+
+
+def test_escrita_interrompida_equivale_a_todos_prefixos_pequenos():
+    from itertools import product
+
+    valores = [bytes(palavra) for tamanho in range(4) for palavra in product(b'ab', repeat=tamanho)]
+    for anterior in valores:
+        for novo in valores:
+            possiveis = {novo} | {novo[:indice] + anterior[indice:] for indice in range(len(novo) + 1)}
+            for atual in valores:
+                assert win_move._escrita_interrompida(anterior, novo, atual) == (atual in possiveis)
+
+
 def test_journal_recusa_troca_de_conteudo_identidade_ou_pais(tmp_path):
     plano = {
         'versao': 1, 'origem': str(tmp_path / 'a'), 'destino': str(tmp_path / 'b'),

@@ -59,6 +59,30 @@ def _estado(origem, destino, plano):
     return 'divergente'
 
 
+def _escrita_interrompida(anterior, novo, atual):
+    """Reconhece prefixos possíveis da escrita sequencial antes do truncate.
+
+    Só identifica uma forma compatível; recuperação ainda exige identidade,
+    journal íntegro e confirmação do usuário.
+    """
+    if not all(isinstance(x, bytes) for x in (anterior, novo, atual)):
+        raise TypeError('Conteúdo de recuperação deve estar em bytes.')
+    if atual == novo:
+        return True
+    if len(atual) > len(anterior):
+        return len(atual) <= len(novo) and atual == novo[:len(atual)]
+    if len(atual) != len(anterior):
+        return False
+    ultimo_diferente_do_anterior = -1
+    primeiro_diferente_do_novo = len(atual)
+    for indice, byte in enumerate(atual):
+        if byte != anterior[indice]:
+            ultimo_diferente_do_anterior = indice
+        if indice >= len(novo) or byte != novo[indice]:
+            primeiro_diferente_do_novo = min(primeiro_diferente_do_novo, indice)
+    return ultimo_diferente_do_anterior < primeiro_diferente_do_novo
+
+
 def _validar_journal(dados):
     if not isinstance(dados, dict) or dados.get('versao') != 1:
         raise ValueError('Journal de movimentação inválido.')
