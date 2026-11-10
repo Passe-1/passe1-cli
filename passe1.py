@@ -10,11 +10,11 @@ from __future__ import annotations
 
 import argparse
 import base64
-import difflib
-import io
 import datetime
+import difflib
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
@@ -736,8 +736,8 @@ def _imagens(caminhos: list[str]) -> list[dict]:
                 raise ValueError("Quarentena e journal do Passe1 não podem ser anexados.")
             from passe1_engine.secure_stream import transmitir
             class ImagemLimitada(io.BytesIO):
-                def write(self, bloco):
-                    if self.tell() + len(bloco) > limite - total:
+                def write(self, bloco, restante=limite - total):
+                    if self.tell() + len(bloco) > restante:
                         raise ValueError("As imagens ultrapassam o limite total de 4 MiB.")
                     return super().write(bloco)
             arquivo = ImagemLimitada()

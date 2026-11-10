@@ -1,8 +1,9 @@
 import json
 import os
-import pytest
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from passe1_engine import launcher
 
@@ -279,7 +280,7 @@ def test_supervisor_preserva_codigo_de_saida():
 def test_supervisor_encaminha_sinal_recebido_durante_spawn(monkeypatch):
     import signal
     class Processo:
-        recebido = []
+        recebido: list = []  # noqa: RUF012
         def send_signal(self, sinal):
             self.recebido.append(sinal)
         def wait(self):
@@ -317,6 +318,7 @@ def test_falha_ao_limpar_staging_nao_e_silenciada(tmp_path):
 def test_staging_windows_usa_bytes_validados_e_aguarda_supervisor(tmp_path, monkeypatch):
     import argparse
     from contextlib import contextmanager
+
     from passe1_engine import win_image_adapter
     imagem = tmp_path / 'foto.png'
     dados = b'\x89PNG\r\n\x1a\noriginal'
@@ -354,7 +356,9 @@ def test_staging_windows_usa_bytes_validados_e_aguarda_supervisor(tmp_path, monk
 def test_windows_distingue_erro_do_motor_e_de_limpeza(tmp_path, monkeypatch):
     import argparse
     from contextlib import contextmanager
+
     import pytest
+
     from passe1_engine import win_image_adapter
     imagem = tmp_path / 'foto.png'
     imagem.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
@@ -374,11 +378,11 @@ def test_windows_distingue_erro_do_motor_e_de_limpeza(tmp_path, monkeypatch):
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}):
         with patch.object(win_image_adapter, 'preparar_imagens', side_effect=preparado), \
-             patch.object(launcher, '_supervision', side_effect=OSError('falha motor')):
+             patch.object(launcher, '_supervision', side_effect=OSError('falha motor')):  # noqa: SIM117
             with pytest.raises(ValueError, match='iniciar o motor'):
                 launcher.iniciar([], agente=args)
         with patch.object(win_image_adapter, 'preparar_imagens', side_effect=falha_limpeza), \
-             patch.object(launcher, '_supervision', return_value=0):
+             patch.object(launcher, '_supervision', return_value=0):  # noqa: SIM117
             with pytest.raises(ValueError, match='preparar ou limpar'):
                 launcher.iniciar([], agente=args)
 

@@ -47,6 +47,7 @@ def test_troca_de_alias_antes_da_leitura_nao_revela_resultado_antigo(tmp_path, m
 
 def test_ripgrep_processa_somente_conteudo_validado(tmp_path, monkeypatch):
     import shutil
+
     from passe1_engine import secure_stream
     ripgrep = shutil.which('rg')
     if not ripgrep:
@@ -80,6 +81,7 @@ def test_busca_sem_copia_temporaria(tmp_path, monkeypatch):
 
 def test_descarta_resultados_se_validacao_final_falhar(tmp_path, monkeypatch):
     import shutil
+
     from passe1_engine import secure_stream
     ripgrep = shutil.which('rg')
     if not ripgrep:

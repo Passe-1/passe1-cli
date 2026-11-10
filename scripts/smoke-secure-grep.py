@@ -8,11 +8,12 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 
 class Gateway(BaseHTTPRequestHandler):
-    respostas = []
+    respostas: ClassVar[list] = []
 
     def log_message(self, *_args):
         pass
@@ -71,7 +72,7 @@ def main():
             ambiente = capturado['env']
             if os.name != 'nt':
                 ambiente['PATH'] = '/usr/bin:/bin'
-            resultado = subprocess.run([capturado['binary'], 'run', '--pure', '--format', 'json', '-m', 'passe1/glm-5.3-flash', 'Procure BUSCA_SEGURA_FIXTURE.'], env=ambiente, capture_output=True, text=True, timeout=120)
+            resultado = subprocess.run([capturado['binary'], 'run', '--pure', '--format', 'json', '-m', 'passe1/glm-5.3-flash', 'Procure BUSCA_SEGURA_FIXTURE.'], env=ambiente, capture_output=True, text=True, timeout=120, check=False)
             saida = json.dumps(Gateway.respostas, ensure_ascii=False)
             if resultado.returncode or 'BUSCA_CONCLUIDA' not in resultado.stdout or 'BUSCA_SEGURA_FIXTURE' not in saida or 'SEGREDO_FIXTURE' in saida:
                 raise SystemExit('Smoke do grep falhou: ' + resultado.stderr[-1000:] + ' ' + resultado.stdout[-1000:] + ' retorno=' + saida[-1000:])

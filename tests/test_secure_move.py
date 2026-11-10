@@ -335,8 +335,9 @@ def test_quarentena_privada_e_inacessivel_as_ferramentas_publicas(tmp_path):
     resultado = agente.executar_ferramenta(tmp_path, 'ler_arquivo', {'caminho': str(backup.relative_to(tmp_path))}, lambda _: 's')
     assert 'origem aprovada' not in resultado
     assert 'quarentena' in resultado.lower()
-    from passe1_engine import secure_search
     import shutil
+
+    from passe1_engine import secure_search
     ripgrep = shutil.which('rg')
     if ripgrep:
         assert secure_search.buscar_candidatos('origem aprovada', [str(backup)], ripgrep) == []

@@ -2,8 +2,8 @@ import argparse
 import contextlib
 import io
 import os
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -45,8 +45,9 @@ def test_recovery_mostra_diff_sanitizado_e_exige_confirmacao(tmp_path, monkeypat
 
 
 def test_recovery_real_em_pty_exibe_diff_e_respeita_recusa(tmp_path):
-    import pexpect
     import sys
+
+    import pexpect
     origem, destino, raiz = tmp_path / 'origem', tmp_path / 'destino', tmp_path / 'journal'
     raiz.mkdir(mode=0o700)
     origem.write_text('origem aprovada\n')

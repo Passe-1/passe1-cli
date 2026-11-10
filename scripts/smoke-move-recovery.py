@@ -9,11 +9,12 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import patch
 
 
 class Gateway(BaseHTTPRequestHandler):
-    respostas = []
+    respostas: ClassVar[list] = []
     def log_message(self, *_args):
         pass
     def do_GET(self):
@@ -75,7 +76,7 @@ def main(destino_existe=True):
             config['permission']['edit'] = 'allow'
             config['provider']['passe1']['models']['gpt-test'] = {'name': 'gpt-test', 'tool_call': True}
             ambiente['OPENCODE_CONFIG_CONTENT'] = json.dumps(config)
-            resultado = subprocess.run([capturado['binary'], 'run', '--pure', '--format', 'json', '-m', 'passe1/gpt-test', 'Execute o teste de move.'], cwd=projeto, env=ambiente, capture_output=True, text=True, timeout=120)
+            resultado = subprocess.run([capturado['binary'], 'run', '--pure', '--format', 'json', '-m', 'passe1/gpt-test', 'Execute o teste de move.'], cwd=projeto, env=ambiente, capture_output=True, text=True, timeout=120, check=False)
             retorno = json.dumps(Gateway.respostas, ensure_ascii=False)
             journals = list((raiz / 'config' / 'opencode' / 'move-journals').glob('.passe1-journal-*'))
             if resultado.returncode or 'MOVE_CONCLUIDO' not in resultado.stdout or len(journals) != 1 or 'destino-confidencial-ficticio' in retorno:

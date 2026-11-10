@@ -55,7 +55,7 @@ print(json.dumps(capturado))
         preparado = subprocess.run([sys.executable, '-I', '-c', programa], cwd=tmp_path, env=ambiente, capture_output=True, text=True, encoding='utf-8', timeout=60, check=True)
         dados = json.loads(preparado.stdout.splitlines()[-1])
         dados['env']['PASSE1_IMAGE_HASHES'] = json.dumps({str(imagem): hashlib.sha256(original).hexdigest()})
-        with imagem.open('r+b') as arquivo:
+        with imagem.open('r+b') as arquivo:  # noqa: SIM117
             with mmap.mmap(arquivo.fileno(), 0, access=mmap.ACCESS_WRITE) as mapa:
                 mapa[-1] = ord('X')
                 mapa.flush()

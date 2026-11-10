@@ -28,9 +28,8 @@ with m.segurar(sys.argv[2]):
         while not pronto.exists() and time.monotonic() < prazo:
             time.sleep(0.05)
         assert pronto.exists()
-        with pytest.raises(TimeoutError):
-            with modulo.segurar(RAIZ, timeout=0.2):
-                pass
+        with pytest.raises(TimeoutError), modulo.segurar(RAIZ, timeout=0.2):
+            pass
     finally:
         filho.kill()
         filho.wait(timeout=10)

@@ -497,7 +497,7 @@ def _main():
     try:
         entrada = json.load(sys.stdin)
         if not isinstance(entrada, dict):
-            raise ValueError('Operação inválida.')
+            raise TypeError('Operação inválida.')
         if entrada.get('operacao') == 'revisar':
             json.dump(revisar(entrada['journal']), sys.stdout)
             return 0

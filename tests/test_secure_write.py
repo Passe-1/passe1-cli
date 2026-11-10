@@ -72,6 +72,7 @@ def test_remocao_nao_segue_ancestral_trocado(tmp_path):
 
 def test_recusa_substituicao_por_outro_inode_com_mesmo_conteudo(tmp_path):
     import io
+
     from passe1_engine import secure_stream
     arquivo = tmp_path / 'arquivo'
     arquivo.write_text('aprovado')

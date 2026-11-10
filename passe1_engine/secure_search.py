@@ -74,7 +74,7 @@ def buscar_candidatos(padrao, caminhos, ripgrep, limite=100):
                  '--max-columns-preview', '--', padrao, '-'],
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             )
-            def ler_saida():
+            def ler_saida(processo=processo, erros=erros, locais=locais, nome=nome):
                 try:
                     buffer = bytearray()
                     excessivo = False
