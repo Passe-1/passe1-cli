@@ -419,3 +419,25 @@ def test_falha_fsync_remove_journal_incompleto(tmp_path, monkeypatch):
         win_secure._guardar_journal(alvo, 'original', (1, 2, 3))
     assert not win_secure._journal_path(alvo).exists()
     assert alvo.read_text(encoding='utf-8') == 'original'
+
+
+def test_ancestral_do_journal_nao_pode_ser_trocado_durante_edicao(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal = win_secure._journal_path(tmp_path / 'alvo')
+    with win_secure._ancorar_journal(journal.parent), pytest.raises(OSError):
+        os.rename(journal.parent, journal.parent.with_name('mudou'))
+    assert journal.parent.is_dir()
+
+
+def test_journal_recusa_ancestral_symlink(tmp_path):
+    from passe1_engine import win_secure
+    real = tmp_path / 'real'
+    real.mkdir()
+    alias = tmp_path / 'alias'
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip('criação de symlink indisponível no runner')
+    with pytest.raises((OSError, ValueError)), win_secure._ancorar_journal(alias):
+        pass

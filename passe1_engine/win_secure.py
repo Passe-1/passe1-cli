@@ -1,6 +1,7 @@
 """Operações Windows por handles; edição/remoção falham fechadas até suporte seguro."""
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -44,12 +45,52 @@ def _journal_path(caminho):
     return diretorio / (chave + ".dpapi")
 
 
+@contextlib.contextmanager
+def _ancorar_journal(diretorio):
+    """Mantém cada ancestral aberto sem compartilhar exclusão durante a operação."""
+    import ctypes
+    from ctypes import wintypes
+
+    caminho = Path(os.path.abspath(diretorio))
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    class Atributos(ctypes.Structure):
+        _fields_ = [("atributos", wintypes.DWORD), ("tag", wintypes.DWORD)]
+    handles = []
+    try:
+        atual = Path(caminho.anchor)
+        for componente in (None, *caminho.parts[1:]):
+            if componente is not None:
+                atual /= componente
+            handle = kernel.CreateFileW(str(atual), 0x100080, 3, None, 3, 0x02200000, None)
+            if handle == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            handles.append(handle)
+            info = Atributos()
+            if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if info.atributos & 0x400 or not info.atributos & 0x10:
+                raise ValueError("Ancestral do journal é link ou não é diretório.")
+        yield
+    finally:
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)
+
+
 def _guardar_journal(caminho, conteudo, identidade):
+    arquivo = _journal_path(caminho)
+    with _ancorar_journal(arquivo.parent):
+        return _guardar_journal_ancorado(arquivo, caminho, conteudo, identidade)
+
+
+def _guardar_journal_ancorado(arquivo, caminho, conteudo, identidade):
     import ctypes
     import msvcrt
     from ctypes import wintypes
 
-    arquivo = _journal_path(caminho)
     dados = json.dumps({"caminho": os.path.abspath(caminho), "conteudo": conteudo, "identidade": identidade}, ensure_ascii=False).encode("utf-8")
     cifrado = _dpapi(dados, True)
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -182,10 +223,11 @@ def _criar(caminho, conteudo):
 def recuperar(caminho):
     """Restaura explicitamente backup de edição interrompida do mesmo arquivo."""
     arquivo = _journal_path(caminho)
-    dados, journal_id = _ler_journal_com_id(arquivo)
-    if os.path.normcase(os.path.abspath(caminho)) != os.path.normcase(dados.get("caminho", "")):
-        raise ValueError("Journal pertence a outro caminho.")
-    _operar(caminho, "", dados["conteudo"], recuperacao=dados, journal_id=journal_id)
+    with _ancorar_journal(arquivo.parent):
+        dados, journal_id = _ler_journal_com_id(arquivo)
+        if os.path.normcase(os.path.abspath(caminho)) != os.path.normcase(dados.get("caminho", "")):
+            raise ValueError("Journal pertence a outro caminho.")
+        _operar(caminho, "", dados["conteudo"], recuperacao=dados, journal_id=journal_id)
 
 
 def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
@@ -282,24 +324,25 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
             if not kernel.GetFileInformationByHandle(arquivo, ctypes.byref(info)):
                 raise ctypes.WinError(ctypes.get_last_error())
             identidade = (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow)
-            if recuperacao is not None:
-                if list(identidade) != recuperacao.get("identidade"):
-                    raise ValueError("Arquivo atual não corresponde ao journal.")
-                journal = _journal_path(alvo)
-            else:
-                journal, journal_id = _guardar_journal(alvo, anterior, identidade)
-            try:
-                _gravar_handle(kernel, arquivo, conteudo)
-            except BaseException as exc:
+            with _ancorar_journal(_journal_path(alvo).parent):
                 if recuperacao is not None:
-                    raise OSError(f"Falha na recuperação; backup criptografado preservado em {journal}.") from exc
+                    if list(identidade) != recuperacao.get("identidade"):
+                        raise ValueError("Arquivo atual não corresponde ao journal.")
+                    journal = _journal_path(alvo)
+                else:
+                    journal, journal_id = _guardar_journal(alvo, anterior, identidade)
                 try:
-                    _gravar_handle(kernel, arquivo, anterior)
-                except BaseException as erro_restauracao:
-                    raise OSError(f"Falha na edição e restauração; backup criptografado em {journal}.") from erro_restauracao
-                raise OSError(f"Falha na edição; conteúdo anterior restaurado. Backup em {journal}.") from exc
-            _apagar_journal(journal, journal_id)
-            return
+                    _gravar_handle(kernel, arquivo, conteudo)
+                except BaseException as exc:
+                    if recuperacao is not None:
+                        raise OSError(f"Falha na recuperação; backup criptografado preservado em {journal}.") from exc
+                    try:
+                        _gravar_handle(kernel, arquivo, anterior)
+                    except BaseException as erro_restauracao:
+                        raise OSError(f"Falha na edição e restauração; backup criptografado em {journal}.") from erro_restauracao
+                    raise OSError(f"Falha na edição; conteúdo anterior restaurado. Backup em {journal}.") from exc
+                _apagar_journal(journal, journal_id)
+                return
         try:
             dados = conteudo.encode('utf-8')
             buffer = ctypes.create_string_buffer(dados)
