@@ -40,3 +40,7 @@ def test_minimo_binario_arredonda_patch(monkeypatch):
         saida = f"Load command 1\n cmd {comando}\n {campo} 13.2.1\n"
         monkeypatch.setattr(modulo["subprocess"], "check_output", lambda *args, saida=saida, **kwargs: saida)
         assert modulo["minimo_binario"]("opencode") == (13, 3)
+
+
+def test_wheel_moderno_arredonda_minor_para_major_compativel():
+    assert _normalizar("macosx_13_0_arm64", "arm64", [(13, 3)]) == "macosx_14_0_arm64"

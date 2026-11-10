@@ -27,4 +27,6 @@ def tag_macos(tag, maquina, minimos=()):
     versao = max((int(match.group(1)), int(match.group(2))), *minimos) if minimos else (int(match.group(1)), int(match.group(2)))
     if maquina == 'arm64':
         versao = max(versao, (11, 0))
+    if versao[0] >= 11 and versao[1]:
+        versao = (versao[0] + 1, 0)
     return f'macosx_{versao[0]}_{versao[1]}_{maquina}'
