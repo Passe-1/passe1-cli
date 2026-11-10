@@ -691,6 +691,89 @@ def test_move_grande_e_recusado_antes_de_criar_journal_ou_alterar_arquivos(tmp_p
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('existente', [False, True])
+def test_protocolo_json_move_e_retornos_sem_vazar_conteudo(tmp_path, existente):
+    import json
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+
+    origem = tmp_path / 'origem.txt'
+    destino = tmp_path / ('destino.txt' if existente else 'nova/filha/destino.txt')
+    raiz_journal = tmp_path / 'config' / 'move-journals'
+    segredo = 'conteúdo-confidencial-do-projeto'
+    origem.write_text(segredo, encoding='utf-8')
+    if existente:
+        destino.write_text('destino-antigo', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    vd = win_secure.snapshot(destino)['identidade'] if existente else win_secure.snapshot_pais(destino)
+    entrada = {
+        'operacao': 'mover', 'origem': str(origem), 'destino': str(destino),
+        'anterior_origem': segredo, 'anterior_destino': 'destino-antigo' if existente else None,
+        'novo': 'conteúdo-novo', 'identidade_origem': vo, 'identidade_destino': vd,
+        'journal_root': str(raiz_journal),
+    }
+    projeto = Path(__file__).resolve().parents[1]
+    comando = [sys.executable, '-X', 'utf8', '-m', 'passe1_engine.secure_move']
+    resultado = subprocess.run(comando, input=json.dumps(entrada, ensure_ascii=False), cwd=projeto, capture_output=True, text=True, encoding='utf-8', timeout=60, check=False)
+    assert resultado.returncode == 0, resultado.stderr
+    saida = json.loads(resultado.stdout)
+    assert Path(saida['journal']).is_file() and saida['quarentena_mantida'] is True
+    assert segredo not in resultado.stdout + resultado.stderr
+    assert not origem.exists() and destino.read_text(encoding='utf-8') == 'conteúdo-novo'
+    if not existente:
+        assert saida['pais'] == win_secure.snapshot_pais(destino)['pais']
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_protocolo_json_recusa_origem_alterada_antes_de_criar_journal(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    raiz_journal = tmp_path / 'config' / 'move-journals'
+    segredo = 'conteúdo-confidencial-do-projeto'
+    origem.write_text(segredo, encoding='utf-8')
+    destino.write_text('destino-antigo', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    origem.write_text('alterado', encoding='utf-8')
+    entrada = {
+        'operacao': 'mover', 'origem': str(origem), 'destino': str(destino),
+        'anterior_origem': segredo, 'anterior_destino': 'destino-antigo', 'novo': 'novo',
+        'identidade_origem': vo, 'identidade_destino': vd, 'journal_root': str(raiz_journal),
+    }
+    resultado = subprocess.run([sys.executable, '-X', 'utf8', '-m', 'passe1_engine.secure_move'], input=json.dumps(entrada, ensure_ascii=False), cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, encoding='utf-8', timeout=60, check=False)
+    assert resultado.returncode != 0 and segredo not in resultado.stdout + resultado.stderr
+    assert origem.read_text(encoding='utf-8') == 'alterado'
+    assert destino.read_text(encoding='utf-8') == 'destino-antigo' and not raiz_journal.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_raiz_de_journal_reparse_e_recusada_sem_alterar_arquivos(tmp_path):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    real, link = tmp_path / 'real', tmp_path / 'link'
+    real.mkdir()
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f'Criação de symlink indisponível: {exc}')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    with pytest.raises((OSError, ValueError)):
+        win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, link)
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert destino.read_text(encoding='utf-8') == 'destino'
+    assert not list(real.iterdir())
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
     from passe1_engine import win_secure
 

@@ -504,12 +504,27 @@ def _main():
         if entrada.get('operacao') == 'recuperar':
             raise ValueError('Recuperação disponível somente no comando local com revisão e confirmação.')
         if entrada.get('operacao') == 'mover':
-            preparar_raiz(entrada['journal_root'])
-            resultado = mover(
-                entrada['origem'], entrada['destino'], entrada['anterior_origem'],
-                entrada['anterior_destino'], entrada['novo'], entrada['identidade_origem'],
-                entrada['identidade_destino'], entrada['journal_root'], retornar_estado=True,
-            )
+            if os.name == 'nt':
+                from passe1_engine import win_move
+                if entrada['anterior_destino'] is None:
+                    journal, identidade = win_move._mover_ausente_experimental(
+                        entrada['origem'], entrada['destino'], entrada['anterior_origem'], entrada['novo'],
+                        entrada['identidade_origem'], entrada['identidade_destino'], entrada['journal_root'],
+                    )
+                    resultado = {'journal': str(journal), 'pais': identidade['pais']}
+                else:
+                    journal = win_move._mover_experimental(
+                        entrada['origem'], entrada['destino'], entrada['anterior_origem'], entrada['anterior_destino'],
+                        entrada['novo'], entrada['identidade_origem'], entrada['identidade_destino'], entrada['journal_root'],
+                    )
+                    resultado = {'journal': str(journal)}
+            else:
+                preparar_raiz(entrada['journal_root'])
+                resultado = mover(
+                    entrada['origem'], entrada['destino'], entrada['anterior_origem'],
+                    entrada['anterior_destino'], entrada['novo'], entrada['identidade_origem'],
+                    entrada['identidade_destino'], entrada['journal_root'], retornar_estado=True,
+                )
         else:
             raise ValueError('Operação inválida.')
         estado = resultado if isinstance(resultado, dict) else {'journal': str(resultado)}

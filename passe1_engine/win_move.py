@@ -212,7 +212,7 @@ def _journal_fixo(raiz, plano):
     raiz = Path(os.path.abspath(raiz))
     nome = 'move-' + secrets.token_hex(16) + '.journal'
     arquivo = raiz / nome
-    with _ancorar_journal(raiz):
+    with _ancorar_journal(raiz, criar=True):
         serializado = _serializar_plano(plano)
         _, identidade = _guardar_journal_ancorado(arquivo, plano['origem'], serializado, plano['id_origem'])
         fd, atual = _abrir_journal_handle(arquivo)
