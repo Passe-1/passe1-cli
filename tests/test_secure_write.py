@@ -82,3 +82,31 @@ def test_recusa_substituicao_por_outro_inode_com_mesmo_conteudo(tmp_path):
     with pytest.raises(ValueError, match='identidade'):
         secure_write.substituir(arquivo, 'aprovado', 'alterado', identidade)
     assert arquivo.read_text() == 'aprovado'
+
+
+def test_criacao_recusa_troca_de_diretorio_apos_aprovacao(tmp_path):
+    projeto = tmp_path / 'projeto'
+    projeto.mkdir()
+    alvo = projeto / 'novo'
+    identidade = secure_write.preparar_criacao(alvo)
+    projeto.rename(tmp_path / 'original')
+    projeto.mkdir()
+    with pytest.raises(ValueError, match='Diretório mudou'):
+        secure_write.substituir(alvo, None, 'dados', identidade)
+    assert not alvo.exists()
+
+
+def test_criacao_recusa_diretorio_que_apareceu_depois_da_aprovacao(tmp_path):
+    alvo = tmp_path / 'ausente' / 'novo'
+    identidade = secure_write.preparar_criacao(alvo)
+    alvo.parent.mkdir()
+    with pytest.raises(ValueError, match='apareceu'):
+        secure_write.substituir(alvo, None, 'dados', identidade)
+    assert not alvo.exists()
+
+
+def test_criacao_permite_criar_diretorios_que_permaneceram_ausentes(tmp_path):
+    alvo = tmp_path / 'novo' / 'sub' / 'arquivo'
+    identidade = secure_write.preparar_criacao(alvo)
+    secure_write.substituir(alvo, None, 'dados', identidade)
+    assert alvo.read_text() == 'dados'

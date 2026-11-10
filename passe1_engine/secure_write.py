@@ -7,11 +7,35 @@ from pathlib import Path
 import arquivos_seguros
 
 
+
+def preparar_criacao(caminho):
+    alvo = Path(os.path.abspath(caminho))
+    raiz, partes = arquivos_seguros._partes(Path(alvo.anchor), alvo)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds = []
+    try:
+        fd = os.open(raiz.anchor, flags)
+        fds.append(fd)
+        st = os.fstat(fd)
+        pais = [[str(st.st_dev), str(st.st_ino)]]
+        for parte in partes[:-1]:
+            try:
+                fd = os.open(parte, flags, dir_fd=fd)
+            except FileNotFoundError:
+                break
+            fds.append(fd)
+            st = os.fstat(fd)
+            pais.append([str(st.st_dev), str(st.st_ino)])
+        return {'pais': pais}
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
 def substituir(caminho, anterior, novo, identidade=None):
     alvo = Path(os.path.abspath(caminho))
     raiz = Path(alvo.anchor)
     if anterior is None:
-        arquivos_seguros.criar(raiz, alvo, novo)
+        arquivos_seguros.criar(raiz, alvo, novo, pais_esperados=identidade.get('pais') if identidade else None)
         return
     texto, versao = arquivos_seguros.ler(raiz, alvo)
     if texto != anterior:
@@ -53,7 +77,10 @@ def _main():
         dados = json.load(sys.stdin)
         if not isinstance(dados, dict) or not isinstance(dados.get('caminho'), str):
             raise ValueError('Dados inválidos para alteração.')
-        if dados.get('anterior') is not None and not isinstance(dados.get('identidade'), dict):
+        if dados.get('operacao') == 'preparar':
+            json.dump(preparar_criacao(dados['caminho']), sys.stdout)
+            return 0
+        if not isinstance(dados.get('identidade'), dict):
             raise ValueError('Identidade aprovada ausente.')
         if dados.get('operacao') == 'remover':
             if not isinstance(dados.get('anterior'), str):

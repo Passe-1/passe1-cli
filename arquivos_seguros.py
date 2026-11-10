@@ -48,7 +48,7 @@ def _partes(raiz, caminho):
 
 
 @contextlib.contextmanager
-def _pai(raiz, caminho, criar=False):
+def _pai(raiz, caminho, criar=False, esperados=None):
     projeto, partes = _partes(raiz, caminho)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fds = []
@@ -60,21 +60,35 @@ def _pai(raiz, caminho, criar=False):
             fds.append(fd)
         raiz_stat = os.fstat(fd)
         pais = [(raiz_stat.st_dev, raiz_stat.st_ino)]
+        if esperados is not None and (not esperados or [str(v) for v in pais[0]] != esperados[0]):
+            raise ValueError("Diretório raiz mudou após a aprovação.")
         for parte in partes[:-1]:
-            try:
-                novo = os.open(parte, flags, dir_fd=fd)
-            except FileNotFoundError:
+            indice = len(pais)
+            if esperados is not None and indice >= len(esperados):
                 if not criar:
-                    raise
+                    raise ValueError("Diretório ausente na aprovação.")
                 try:
                     os.mkdir(parte, 0o755, dir_fd=fd)
                 except FileExistsError:
-                    pass
+                    raise ValueError("Diretório apareceu após a aprovação.") from None
                 novo = os.open(parte, flags, dir_fd=fd)
+            else:
+                try:
+                    novo = os.open(parte, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    if not criar or esperados is not None:
+                        raise
+                    try:
+                        os.mkdir(parte, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    novo = os.open(parte, flags, dir_fd=fd)
             fds.append(novo)
             fd = novo
             st = os.fstat(fd)
             pais.append((st.st_dev, st.st_ino))
+            if esperados is not None and indice < len(esperados) and [str(st.st_dev), str(st.st_ino)] != esperados[indice]:
+                raise ValueError("Diretório mudou após a aprovação.")
         yield fd, partes[-1], tuple(pais)
     finally:
         for fd in reversed(fds):
@@ -165,10 +179,10 @@ def _remover_temporario(pai, nome, identidade):
         os.unlink(nome, dir_fd=pai)
 
 
-def criar(raiz, caminho, conteudo):
+def criar(raiz, caminho, conteudo, pais_esperados=None):
     """Cria arquivo completo sem seguir links ou sobrescrever entrada existente."""
     raiz_resolvida = Path(os.path.abspath(raiz))
-    with _pai(raiz_resolvida, caminho, criar=True) as (pai, _nome, pais):
+    with _pai(raiz_resolvida, caminho, criar=True, esperados=pais_esperados) as (pai, _nome, pais):
         tmp = ".passe1-" + secrets.token_hex(16)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=pai)
         st = os.fstat(fd)
