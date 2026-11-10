@@ -140,6 +140,21 @@ def test_recusa_envelope_maior_que_limite_de_recuperacao(tmp_path, monkeypatch):
         win_move._serializar_plano(plano)
 
 
+def test_journal_de_destino_ausente_nao_inventa_conteudo_ou_identidade(tmp_path):
+    plano = {
+        'versao': 1, 'origem': str(tmp_path / 'a'), 'destino': str(tmp_path / 'b'),
+        'id_origem': ['1', '2', '3'], 'id_destino': None,
+        'pais_origem': [['1', '0', '2']], 'pais_destino': [['1', '0', '2']],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+    }
+    assert win_move._validar_journal(plano) == plano
+    for invalido in ({'id_destino': ['1', '2', '4']}, {'conteudo_destino': 'algo'}, {'hash_destino': win_move._digest('algo')}):
+        with pytest.raises(ValueError):
+            win_move._validar_journal({**plano, **invalido})
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='requer DPAPI do Windows')
 def test_journal_dpapi_protege_e_autentica_conteudos(tmp_path):
     plano = {

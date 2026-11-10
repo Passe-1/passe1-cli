@@ -127,12 +127,19 @@ def _restaurar_conteudo(fd, anterior, novo, *, confirmado=False):
 def _validar_journal(dados):
     if not isinstance(dados, dict) or dados.get('versao') != 1:
         raise ValueError('Journal de movimentação inválido.')
+    ausente = dados.get('destino_ausente', False)
+    if not isinstance(ausente, bool):
+        raise TypeError('Estado do destino inválido no journal.')
+    if any(chave not in dados for chave in ('id_destino', 'conteudo_destino', 'hash_destino')):
+        raise ValueError('Journal de movimentação incompleto.')
     for nome in ('origem', 'destino'):
         caminho = dados.get(nome)
         if not isinstance(caminho, str) or not os.path.isabs(caminho):
             raise ValueError('Caminho inválido no journal.')
         identidade = dados.get('id_' + nome)
-        if not isinstance(identidade, list) or len(identidade) != 3 or any(not isinstance(v, str) or not v.isdecimal() for v in identidade):
+        if nome == 'destino' and ausente and identidade is not None:
+            raise ValueError('Identidade inválida para destino ausente.')
+        if not (nome == 'destino' and ausente and identidade is None) and (not isinstance(identidade, list) or len(identidade) != 3 or any(not isinstance(v, str) or not v.isdecimal() for v in identidade)):
             raise ValueError('Identidade inválida no journal.')
         pais = dados.get('pais_' + nome)
         if not isinstance(pais, list) or not pais or any(
@@ -146,6 +153,10 @@ def _validar_journal(dados):
     for nome in ('origem', 'destino', 'novo'):
         texto = dados.get('conteudo_' + nome)
         digest = dados.get('hash_' + nome)
+        if nome == 'destino' and ausente:
+            if texto is not None or digest is not None:
+                raise ValueError('Conteúdo inválido para destino ausente.')
+            continue
         if not isinstance(digest, str) or not hmac.compare_digest(_digest(texto), digest):
             raise ValueError('Conteúdo do journal não corresponde ao hash.')
     return dados
