@@ -454,6 +454,8 @@ def _abrir_registro_stage(journal):
             esperado = hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
             if (
                 plano.get('destino_ausente') is not True
+                or not isinstance(plano.get('stage'), str)
+                or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', plano['stage'])
                 or registro.get('versao') != 1
                 or registro.get('journal') != list(id_journal)
                 or registro.get('stage') != plano.get('stage')

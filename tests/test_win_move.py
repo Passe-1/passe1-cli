@@ -426,6 +426,41 @@ os._exit(91)
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_registro_de_stage_recusa_nome_invalido_sem_tocar_arquivo(tmp_path):
+    import hashlib
+    import json
+
+    from passe1_engine import win_secure
+
+    origem, destino, protegido = tmp_path / 'origem.txt', tmp_path / 'destino.txt', tmp_path / 'protegido'
+    origem.write_text('origem', encoding='utf-8')
+    protegido.write_text('preservar', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'), 'stage': '../protegido',
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, identidade):
+        pass
+    registro = {
+        'versao': 1, 'journal': list(identidade), 'stage': plano['stage'],
+        'id_stage': ['1', '2', '3'], 'pais_destino': plano['pais_destino'],
+        'hash_novo': plano['hash_novo'],
+        'hash_plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
+    }
+    with win_secure._ancorar_journal(tmp_path):
+        win_secure._guardar_journal_ancorado(Path(str(journal) + '.stage'), destino, json.dumps(registro), registro['id_stage'])
+    with pytest.raises(ValueError, match='não corresponde'), win_move._abrir_registro_stage(journal):
+        pytest.fail('Não deve aceitar nome de stage fora do formato.')
+    assert protegido.read_text(encoding='utf-8') == 'preservar'
+    assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
     from passe1_engine import win_secure
 
