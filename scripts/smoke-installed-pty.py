@@ -62,24 +62,26 @@ def main():
                             log.seek(0)
                             raise RuntimeError("Motor não iniciou: " + log.read()[-2000:]) from None
                         time.sleep(0.1)
-                criado = requisitar("/api/pty", {"command": sys.executable, "args": ["-u", "-c", "input(); print('PASSE1_PTY_RESPOSTA', flush=True); input()"]})
+                criado = requisitar("/api/pty", {"command": sys.executable, "args": ["-u", "-c", "print('PASSE1_PTY_PRONTO', flush=True); input(); print('PASSE1_PTY_RESPOSTA', flush=True); input()"]})
                 ident = criado["data"]["id"]
                 token = requisitar(f"/api/pty/{ident}/connect-token", {}, {"x-opencode-ticket": "1"})["data"]["ticket"]
                 with connect(f"ws://127.0.0.1:{numero}/api/pty/{ident}/connect?ticket={token}", additional_headers=headers, open_timeout=15) as canal:
                     enter = "\r" if os.name == "nt" else "\n"
-                    canal.send("iniciar" + enter)
                     texto = ""
                     prazo = time.monotonic() + 30
-                    while "PASSE1_PTY_RESPOSTA" not in texto:
-                        restante = prazo - time.monotonic()
-                        if restante <= 0:
-                            raise RuntimeError("PTY não retornou a resposta esperada")
-                        try:
-                            quadro = canal.recv(timeout=restante)
-                        except TimeoutError:
-                            estado = requisitar(f"/api/pty/{ident}")["data"]["status"]
-                            raise RuntimeError(f"PTY não respondeu: estado={estado}, saída={texto[-500:]!r}") from None
-                        texto += quadro.decode("utf-8", "replace") if isinstance(quadro, bytes) else quadro
+                    for marcador in ("PASSE1_PTY_PRONTO", "PASSE1_PTY_RESPOSTA"):
+                        while marcador not in texto:
+                            restante = prazo - time.monotonic()
+                            if restante <= 0:
+                                raise RuntimeError(f"PTY não retornou {marcador}: saída={texto[-500:]!r}")
+                            try:
+                                quadro = canal.recv(timeout=restante)
+                            except TimeoutError:
+                                estado = requisitar(f"/api/pty/{ident}")["data"]["status"]
+                                raise RuntimeError(f"PTY não retornou {marcador}: estado={estado}, saída={texto[-500:]!r}") from None
+                            texto += quadro.decode("utf-8", "replace") if isinstance(quadro, bytes) else quadro
+                        if marcador == "PASSE1_PTY_PRONTO":
+                            canal.send("iniciar" + enter)
                     canal.send("encerrar" + enter)
                 prazo = time.monotonic() + 15
                 while requisitar(f"/api/pty/{ident}")["data"]["status"] != "exited":
