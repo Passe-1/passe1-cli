@@ -1375,10 +1375,18 @@ index c1ef61b2..a510426b 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index a970f85d..07bc897c 100644
+index a970f85d..b59e0a10 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
-@@ -181,6 +181,25 @@ const mustTruncate = (result: {
+@@ -4,6 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { Cause, Effect, Exit, Layer } from "effect"
+ import type * as Scope from "effect/Scope"
+ import os from "os"
++import fs from "node:fs/promises"
+ import path from "path"
+ import { Config } from "@/config/config"
+ import { Shell } from "@opencode-ai/core/shell"
+@@ -181,6 +182,25 @@ const mustTruncate = (result: {
  }
  
  describe("tool.shell", () => {
@@ -1404,6 +1412,60 @@ index a970f85d..07bc897c 100644
    each("basic", () =>
      runIn(
        projectRoot,
+@@ -1106,29 +1126,31 @@ describe("tool.shell abort", () => {
+   )
+ 
+   it.live("streams metadata updates progressively", () =>
+-    runIn(
+-      projectRoot,
+-      Effect.gen(function* () {
+-        const updates: string[] = []
+-        const result = yield* run(
+-          {
+-            command: `echo first && sleep 0.1 && echo second`,
+-          },
+-          {
+-            ...ctx,
+-            metadata: (input) =>
+-              Effect.sync(() => {
+-                const output = (input.metadata as { output?: string })?.output
+-                if (output) updates.push(output)
+-              }),
+-          },
+-        )
+-        expect(result.output).toContain("first")
+-        expect(result.output).toContain("second")
+-        expect(updates.length).toBeGreaterThan(1)
+-      }),
+-    ),
++    Effect.gen(function* () {
++      const directory = yield* tmpdirScoped()
++      const barrier = path.join(directory, "continuar")
++      const script = path.join(directory, "stream.js")
++      yield* Effect.promise(() => fs.writeFile(script, `const fs = require("fs"); process.stdout.write("first\\n"); const end = Date.now() + 10000; const tick = setInterval(() => { if (fs.existsSync(process.argv[2])) { clearInterval(tick); process.stdout.write("second\\n"); } else if (Date.now() > end) { clearInterval(tick); process.exitCode = 1; } }, 20);`))
++      const updates: string[] = []
++      let liberated = false
++      const result = yield* runIn(directory, run(
++        { command: `${JSON.stringify(process.execPath)} ${JSON.stringify(script)} ${JSON.stringify(barrier)}` },
++        { ...ctx, metadata: (input) => Effect.gen(function* () {
++          const output = (input.metadata as { output?: string })?.output
++          if (output) updates.push(output)
++          if (!liberated && output?.includes("first")) {
++            liberated = true
++            yield* Effect.promise(() => fs.writeFile(barrier, "ok"))
++          }
++        }) },
++      ))
++      expect(result.metadata.exit).toBe(0)
++      expect(result.output).toContain("first")
++      expect(result.output).toContain("second")
++      expect(updates.length).toBeGreaterThan(1)
++    }),
+   )
++
+ })
+ 
+ describe("tool.shell truncation", () => {
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 index 4f897dc8..66398c66 100644
 --- a/packages/opencode/test/tool/write.test.ts
