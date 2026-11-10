@@ -83,3 +83,14 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
             if handle != invalido:
                 kernel.CloseHandle(handle)
     assert destino.read_text(encoding='utf-8') == 'depois'
+
+
+def test_criacao_falha_remove_arquivo_incompleto(tmp_path):
+    from passe1_engine.win_secure import substituir
+    class ConteudoInvalido:
+        def encode(self, _):
+            raise RuntimeError('falha simulada')
+    alvo = tmp_path / 'incompleto.txt'
+    with pytest.raises(RuntimeError, match='falha simulada'):
+        substituir(alvo, None, ConteudoInvalido())
+    assert not alvo.exists()

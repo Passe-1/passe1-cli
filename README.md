@@ -126,3 +126,6 @@ O gateway que serve o instalador mantém atualmente uma cópia do CLI. Alteraç�
 Em macOS e Linux, `agent --session` salva mensagens, saídas e imagens em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. No Windows, o comando usa sessões do motor OpenCode, guardadas no estado isolado de `~/.config/passe1/opencode/`; elas não são compatíveis com as sessões do agente legado. O histórico pode conter dados sensíveis. Sessões nomeadas são vinculadas ao projeto, gateway, modelo e chave usados na criação.
 
 `agent --sandbox` permanece disponível somente no macOS. A verificação de links reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.
+
+
+A CI aceita o marcador `[windows-only]` em commits de desenvolvimento para executar somente os dois runners Windows. Essa execução mantém o gate da matriz completa vermelho; o commit final deve ser enviado sem o marcador para executar os seis alvos. A release continua exigindo todos os builds.

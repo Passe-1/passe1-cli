@@ -7,16 +7,11 @@ permissions:
   contents: read
 jobs:
   build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-          - os: macos-15-intel
-          - os: ubuntu-latest
-          - os: ubuntu-24.04-arm
-          - os: windows-latest
-          - os: windows-11-arm
+        os: ${{ fromJSON(contains(github.event.head_commit.message, '[windows-only]') && '["windows-latest","windows-11-arm"]' || '["macos-15","macos-15-intel","ubuntu-latest","ubuntu-24.04-arm","windows-latest","windows-11-arm"]') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -50,3 +45,22 @@ jobs:
         with:
           name: wheel-${{ matrix.os }}
           path: dist/*.whl
+
+  full-matrix-gate:
+    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Exigir a matriz completa e verde
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [[ "$COMMIT_MESSAGE" == *"[windows-only]"* ]]; then
+            echo "A execução parcial não autoriza merge ou release."
+            exit 1
+          fi
+          if [[ "$BUILD_RESULT" != "success" ]]; then
+            echo "A matriz completa não passou."
+            exit 1
+          fi
