@@ -133,6 +133,13 @@ def test_journal_recusa_troca_de_conteudo_identidade_ou_pais(tmp_path):
             win_move._validar_journal({**plano, **mudanca})
 
 
+def test_recusa_envelope_maior_que_limite_de_recuperacao(tmp_path, monkeypatch):
+    monkeypatch.setattr(win_move, 'LIMITE_EDICAO', 1100)
+    plano = {'origem': str(tmp_path / 'origem'), 'id_origem': ['1', '2', '3'], 'conteudo': '\x00' * 100}
+    with pytest.raises(ValueError, match='limite de recuperação'):
+        win_move._serializar_plano(plano)
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='requer DPAPI do Windows')
 def test_journal_dpapi_protege_e_autentica_conteudos(tmp_path):
     plano = {

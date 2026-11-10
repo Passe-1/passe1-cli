@@ -166,6 +166,21 @@ def _abrir_journal(dados):
     return _validar_journal(conteudo)
 
 
+def _serializar_plano(plano):
+    """Recusa antes de gravar um journal que a leitura limitada não aceitaria."""
+    serializado = json.dumps(plano, ensure_ascii=False, separators=(',', ':'))
+    envelope = json.dumps({
+        'caminho': os.path.abspath(plano['origem']),
+        'conteudo': serializado,
+        'identidade': plano['id_origem'],
+    }, ensure_ascii=False).encode('utf-8')
+    # DPAPI acrescenta cabeçalho e autenticação; reservar espaço evita criar
+    # journal maior que o limite aceito na recuperação.
+    if len(envelope) > LIMITE_EDICAO * 4 - 4096:
+        raise ValueError('Journal excede o limite de recuperação.')
+    return serializado
+
+
 @contextmanager
 def _journal_fixo(raiz, plano):
     """Experimento: grava journal cifrado e mantém arquivo e ancestrais abertos.
@@ -178,12 +193,14 @@ def _journal_fixo(raiz, plano):
     nome = 'move-' + secrets.token_hex(16) + '.journal'
     arquivo = raiz / nome
     with _ancorar_journal(raiz):
-        serializado = json.dumps(plano, ensure_ascii=False, separators=(',', ':'))
+        serializado = _serializar_plano(plano)
         _, identidade = _guardar_journal_ancorado(arquivo, plano['origem'], serializado, plano['id_origem'])
         fd, atual = _abrir_journal_handle(arquivo)
         try:
             if atual != identidade:
                 raise ValueError('Journal mudou durante a preparação.')
+            if os.fstat(fd).st_size > LIMITE_EDICAO * 4:
+                raise ValueError('Journal excede o limite de recuperação; nenhum arquivo foi alterado.')
             partes = []
             while parte := os.read(fd, 65536):
                 partes.append(parte)
