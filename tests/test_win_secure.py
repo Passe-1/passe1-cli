@@ -51,3 +51,35 @@ def test_remover_recusa_hardlink(tmp_path):
         remover(alias, 'antes')
     assert alvo.read_text(encoding='utf-8') == 'antes'
     assert alias.exists()
+
+
+def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
+    """Verifica se NTFS permite replace atômico mantendo destino bloqueado."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    destino = tmp_path / 'original.txt'
+    destino.write_text('antes', encoding='utf-8')
+    temporario = tmp_path / 'temporario.txt'
+    temporario.write_text('depois', encoding='utf-8')
+    invalido = wintypes.HANDLE(-1).value
+    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 3, None, 3, 0x02000000, None)
+    original = kernel.CreateFileW(str(destino), 0x80000000, 0, None, 3, 0, None)
+    novo = kernel.CreateFileW(str(temporario), 0x10000, 7, None, 3, 0, None)
+    try:
+        assert all(h != invalido for h in (diretorio, original, novo))
+        nome = destino.name
+        class RenameInfo(ctypes.Structure):
+            _fields_ = [('Flags', wintypes.DWORD), ('RootDirectory', wintypes.HANDLE), ('FileNameLength', wintypes.DWORD), ('FileName', wintypes.WCHAR * len(nome))]
+        dados = RenameInfo(3, diretorio, len(nome.encode('utf-16-le')), nome)
+        ok = kernel.SetFileInformationByHandle(novo, 22, ctypes.byref(dados), ctypes.sizeof(dados))
+        assert ok, f'FileRenameInfoEx falhou: {ctypes.get_last_error()}'
+    finally:
+        for handle in (novo, original, diretorio):
+            if handle != invalido:
+                kernel.CloseHandle(handle)
+    assert destino.read_text(encoding='utf-8') == 'depois'
