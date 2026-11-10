@@ -28,7 +28,7 @@ import httpx
 
 from terminal import seguro as _terminal_seguro
 
-VERSAO = "0.2.7"
+VERSAO = "0.3.0"
 SISTEMA_PADRAO = "Você é o assistente do Passe1. Responda SEMPRE em português do Brasil, de forma clara e direta. Nunca misture idiomas na mesma resposta. Só use outro idioma se a pessoa pedir explicitamente."
 BASE_URL_PADRAO = "https://passe.dehor.com.br/v1"
 PREFIXO_CHAVE = "sk-passe1-"
@@ -387,6 +387,13 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
+    from passe1_engine.launcher import limpar_credencial
+    erro_motor = False
+    try:
+        limpar_credencial()
+    except OSError:
+        print("Não foi possível apagar a credencial do motor OpenCode.")
+        erro_motor = True
     sessao = _ler_sessao()
     if sessao:
         try:
@@ -402,12 +409,12 @@ def cmd_logout(args: argparse.Namespace) -> int:
         _arquivo_chave().unlink()
     except FileNotFoundError:
         print("Voce ja estava deslogado.")
-        return 0
+        return 1 if erro_motor else 0
     except OSError as exc:
         print(f"Nao consegui apagar a chave guardada: {exc}.")
         return 1
-    print("Logout ok! Chave apagada deste computador.")
-    return 0
+    print("Chave do CLI apagada deste computador." if erro_motor else "Logout ok! Chave apagada deste computador.")
+    return 1 if erro_motor else 0
 
 
 def cmd_models(args: argparse.Namespace) -> int:
@@ -1146,6 +1153,9 @@ def montar_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argumentos = sys.argv[1:] if argv is None else argv
+    if not argumentos and sys.stdin.isatty() and sys.stdout.isatty():
+        from passe1_engine.launcher import iniciar
+        return iniciar([])
     if not argumentos:
         argumentos = ["agent"]
     args = montar_parser().parse_args(argumentos)

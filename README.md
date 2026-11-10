@@ -15,7 +15,9 @@ passe1 agent
 
 Para atualizar, execute novamente o instalador acima. A versão no PyPI pode estar desatualizada; prefira o instalador do site.
 
-Desenvolvedores: instale com `pip install -e .` ou execute `python passe1.py ...`.
+O comando `passe1` em terminal interativo abre a interface do OpenCode com a conta Passe1. O login e o saldo continuam disponíveis por `passe1 login` e `passe1 status`. O código do OpenCode é distribuído sob licença MIT, preservada em `passe1_engine/OPENCODE_LICENSE.txt`.
+
+Para construir a partir do código-fonte, inicialize o submódulo (`git submodule update --init --recursive`), instale Bun 1.3.14 e execute `python scripts/build-engine.py` seguido de `python -m build --wheel`. O wheel inclui o motor nativo para a plataforma em que foi construído. Ele não depende de um OpenCode instalado separadamente.
 
 ## Uso
 
