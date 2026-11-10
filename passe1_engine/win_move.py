@@ -19,6 +19,7 @@ from passe1_engine.win_secure import (
     _ancorar_journal,
     _dpapi,
     _guardar_journal_ancorado,
+    _marcar_exclusao_journal,
     snapshot_pais,
 )
 from passe1_engine.win_secure import (
@@ -471,6 +472,224 @@ def _abrir_registro_stage(journal):
             yield plano, registro
         finally:
             os.close(fd)
+
+
+@contextmanager
+def _abrir_stage_fixo(journal, *, publicado=False):
+    """Confere o arquivo registrado por handle relativo e mantém-no fixado."""
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    with _abrir_registro_stage(journal) as (plano, registro):
+        destino = Path(plano['destino'])
+        with _ancorar_journal(destino.parent):
+            if snapshot_pais(destino)['pais'] != registro['pais_destino']:
+                raise ValueError('Diretório do stage mudou após o registro.')
+            pai = kernel.CreateFileW(str(destino.parent), 0x100084, 3, None, 3, 0x02200000, None)
+            if pai == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                info_pai = _Info()
+                if not kernel.GetFileInformationByHandle(pai, ctypes.byref(info_pai)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                id_pai = [str(info_pai.volume), str(info_pai.index_high), str(info_pai.index_low)]
+                if info_pai.attributes & 0x400 or not info_pai.attributes & 0x10 or id_pai != registro['pais_destino'][-1]:
+                    raise ValueError('Diretório do stage mudou após o registro.')
+                nome = destino.name if publicado else registro['stage']
+                buffer = ctypes.create_unicode_buffer(nome)
+                tamanho = len(nome.encode('utf-16-le'))
+                palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+                attrs = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+                handle, ios = wintypes.HANDLE(), _Io()
+                status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110080, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 0, 1, 0x00200060, None, 0)
+                if status < 0:
+                    raise OSError(f'NtCreateFile do stage falhou: 0x{status & 0xffffffff:08x}')
+                try:
+                    info = _Info()
+                    if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    identidade = [str(info.volume), str(info.index_high), str(info.index_low)]
+                    if info.attributes & (0x400 | 0x10) or info.links != 1 or identidade != registro['id_stage']:
+                        raise ValueError('Identidade do stage mudou.')
+                    fd = msvcrt.open_osfhandle(handle.value, os.O_RDWR | os.O_BINARY)
+                    handle = None
+                    try:
+                        if not hmac.compare_digest(hashlib.sha256(_conteudo_handle(fd)).hexdigest(), registro['hash_novo']):
+                            raise ValueError('Conteúdo do stage mudou.')
+                        if snapshot_pais(destino)['pais'] != registro['pais_destino']:
+                            raise ValueError('Diretório do stage mudou durante a preparação.')
+                        yield fd, pai, plano, registro
+                    finally:
+                        os.close(fd)
+                finally:
+                    if handle is not None:
+                        kernel.CloseHandle(handle)
+            finally:
+                kernel.CloseHandle(pai)
+
+
+@contextmanager
+def _origem_fixa(plano, *, em_quarentena=False):
+    """Fixa origem e pai relativos ao snapshot para destino novo."""
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
+
+    plano = _validar_journal(plano)
+    origem = Path(plano['origem'])
+    if em_quarentena:
+        nome = plano.get('quarentena')
+        if not isinstance(nome, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', nome):
+            raise ValueError('Nome de quarentena inválido no journal.')
+        origem = origem.with_name(nome)
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    with _ancorar_journal(origem.parent):
+        if snapshot_pais(origem)['pais'] != plano['pais_origem']:
+            raise ValueError('Diretório da origem mudou após aprovação.')
+        pai = kernel.CreateFileW(str(origem.parent), 0x100084, 3, None, 3, 0x02200000, None)
+        if pai == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            info_pai = _Info()
+            if not kernel.GetFileInformationByHandle(pai, ctypes.byref(info_pai)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            id_pai = [str(info_pai.volume), str(info_pai.index_high), str(info_pai.index_low)]
+            if info_pai.attributes & 0x400 or not info_pai.attributes & 0x10 or id_pai != plano['pais_origem'][-1]:
+                raise ValueError('Diretório da origem mudou após aprovação.')
+            buffer = ctypes.create_unicode_buffer(origem.name)
+            tamanho = len(origem.name.encode('utf-16-le'))
+            palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attrs = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+            handle, ios = wintypes.HANDLE(), _Io()
+            status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110080, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 0, 1, 0x00200060, None, 0)
+            if status < 0:
+                raise OSError(f'NtCreateFile da origem falhou: 0x{status & 0xffffffff:08x}')
+            try:
+                info = _Info()
+                if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                identidade = [str(info.volume), str(info.index_high), str(info.index_low)]
+                if info.attributes & (0x400 | 0x10) or info.links != 1 or identidade != plano['id_origem']:
+                    raise ValueError('Identidade da origem mudou.')
+                fd = msvcrt.open_osfhandle(handle.value, os.O_RDWR | os.O_BINARY)
+                handle = None
+                try:
+                    if not hmac.compare_digest(hashlib.sha256(_conteudo_handle(fd)).hexdigest(), plano['hash_origem']):
+                        raise ValueError('Conteúdo da origem mudou.')
+                    if snapshot_pais(origem)['pais'] != plano['pais_origem']:
+                        raise ValueError('Diretório da origem mudou durante preparação.')
+                    yield fd, pai
+                finally:
+                    os.close(fd)
+            finally:
+                if handle is not None:
+                    kernel.CloseHandle(handle)
+        finally:
+            kernel.CloseHandle(pai)
+
+
+def _publicar_ausente_experimental(journal):
+    """Experimento desconectado: quarentena origem e publica stage validado."""
+    try:
+        with _abrir_stage_fixo(journal) as (fd_stage, pai_destino, plano, registro), _origem_fixa(plano) as (fd_origem, pai_origem):
+            quarentena = plano.get('quarentena')
+            if not isinstance(quarentena, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', quarentena):
+                raise ValueError('Nome de quarentena inválido no journal.')
+            destino = Path(plano['destino'])
+            if os.path.lexists(destino):
+                raise ValueError('Destino surgiu após a aprovação.')
+            _renomear_handle(fd_origem, pai_origem, quarentena)
+            _renomear_handle(fd_stage, pai_destino, destino.name)
+            return {'arquivo': registro['id_stage'], 'pais': registro['pais_destino']}
+    except BaseException as exc:
+        raise RuntimeError(f'Publicação interrompida; journal preservado: {str(journal)!r}') from exc
+
+
+@contextmanager
+def _revisao_ausente_fixa(journal):
+    with _abrir_plano_fixo(journal) as (_, _, plano_inicial):
+        plano_inicial = dict(plano_inicial)
+    if plano_inicial.get('destino_ausente') is not True:
+        raise ValueError('Journal não é de destino ausente.')
+    origem, destino = Path(plano_inicial['origem']), Path(plano_inicial['destino'])
+    quarentena, nome_stage = plano_inicial.get('quarentena'), plano_inicial.get('stage')
+    if not isinstance(quarentena, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', quarentena):
+        raise ValueError('Nome de quarentena inválido no journal.')
+    if not isinstance(nome_stage, str) or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome_stage):
+        raise ValueError('Nome de stage inválido no journal.')
+    etapa = destino.with_name(nome_stage)
+    presente, guardada = os.path.lexists(origem), os.path.lexists(origem.with_name(quarentena))
+    preparado, publicado = os.path.lexists(etapa), os.path.lexists(destino)
+    if presente == guardada or (preparado and publicado):
+        raise ValueError('Arquivos de recuperação ausentes ou em conflito.')
+    with ExitStack() as pilha:
+        if preparado or publicado:
+            fd_stage, _pai_destino, plano, registro = pilha.enter_context(_abrir_stage_fixo(journal, publicado=publicado))
+            atual = _conteudo_handle(fd_stage)
+        else:
+            plano, registro = pilha.enter_context(_abrir_registro_stage(journal))
+            fd_stage, atual = None, b''
+        if plano != plano_inicial:
+            raise ValueError('Journal mudou durante a revisão.')
+        fd_origem, pai_origem = pilha.enter_context(_origem_fixa(plano, em_quarentena=guardada))
+        if (os.path.lexists(origem), os.path.lexists(origem.with_name(quarentena)), os.path.lexists(etapa), os.path.lexists(destino)) != (presente, guardada, preparado, publicado):
+            raise ValueError('Arquivos mudaram durante a revisão.')
+        estado = {'registro': registro, 'origem_quarentena': guardada, 'stage': preparado, 'publicado': publicado}
+        revisao = hashlib.sha256(json.dumps(estado, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+        yield plano, fd_origem, pai_origem, fd_stage, atual, guardada, preparado, publicado, revisao
+
+
+def _revisar_ausente_experimental(journal):
+    with _revisao_ausente_fixa(journal) as (plano, _, _, _, atual, guardada, preparado, publicado, revisao):
+        token = secrets.token_urlsafe(32)
+        if len(_revisoes) >= 32:
+            del _revisoes[next(iter(_revisoes))]
+        _revisoes[token] = revisao
+        return {'revisao': token, 'origem': plano['origem'], 'destino': plano['destino'],
+                'conteudo_origem': plano['conteudo_origem'], 'conteudo_destino_anterior': None,
+                'conteudo_destino_atual': atual, 'origem_em_quarentena': guardada,
+                'stage_preparado': preparado, 'destino_publicado': publicado}
+
+
+def _recuperar_ausente_experimental(journal, revisao, *, confirmado=False):
+    if confirmado is not True:
+        raise ValueError('Recuperação exige confirmação explícita.')
+    if not isinstance(revisao, str):
+        raise TypeError('Revisão inválida ou já utilizada.')
+    esperada = _revisoes.pop(revisao, None)
+    if esperada is None:
+        raise ValueError('Revisão inválida ou já utilizada.')
+    with _revisao_ausente_fixa(journal) as (plano, fd_origem, pai_origem, fd_stage, _, guardada, _, _, atual):
+        if not hmac.compare_digest(esperada, atual):
+            raise ValueError('Estado mudou desde a revisão; recuperação recusada.')
+        if fd_stage is not None:
+            _marcar_exclusao_journal(fd_stage)
+        if guardada:
+            _renomear_handle(fd_origem, pai_origem, Path(plano['origem']).name)
 
 
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):

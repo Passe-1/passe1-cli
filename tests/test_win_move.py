@@ -370,6 +370,18 @@ def test_stage_persistente_exige_journal_previo_e_nao_sobrescreve(tmp_path):
     assert registro['hash_novo'] == win_move._digest('novo')
     with win_move._abrir_registro_stage(journal) as (plano_lido, registro_lido):
         assert plano_lido == plano and registro_lido == registro
+    with win_move._abrir_stage_fixo(journal) as (fd_stage, _pai, _plano, _registro):
+        assert os.read(fd_stage, 4) == b'novo'
+        with pytest.raises(OSError):
+            (tmp_path / nome).rename(tmp_path / 'trocado')
+    with win_move._origem_fixa(plano) as (fd_origem, _pai):
+        assert os.read(fd_origem, 6) == b'origem'
+        with pytest.raises(OSError):
+            origem.rename(tmp_path / 'origem-trocada')
+    (tmp_path / nome).write_bytes(b'terceiro')
+    with pytest.raises(ValueError, match='Conteúdo do stage mudou'), win_move._abrir_stage_fixo(journal):
+        pytest.fail('Não deve aceitar conteúdo alterado.')
+    (tmp_path / nome).write_bytes(b'novo')
     registro['hash_plano'] = '0' * 64
     arquivo_registro = Path(str(journal) + '.stage')
     arquivo_registro.unlink()
@@ -458,6 +470,148 @@ def test_registro_de_stage_recusa_nome_invalido_sem_tocar_arquivo(tmp_path):
         pytest.fail('Não deve aceitar nome de stage fora do formato.')
     assert protegido.read_text(encoding='utf-8') == 'preservar'
     assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('colisao', [False, True])
+def test_publicacao_experimental_destino_ausente_nao_sobrescreve(tmp_path, colisao):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino-novo.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+        'stage': 'passe1-stage-' + 'c' * 32, 'quarentena': 'passe1-move-' + 'd' * 32,
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        pass
+    with win_move._preparar_stage_registrado(journal) as (fd, _pai, nome, identidade):
+        win_move._gravar_handle(fd, b'novo')
+    if colisao:
+        destino.write_text('terceiro', encoding='utf-8')
+        with pytest.raises(RuntimeError, match='journal preservado'):
+            win_move._publicar_ausente_experimental(journal)
+        assert destino.read_text(encoding='utf-8') == 'terceiro'
+        assert origem.read_text(encoding='utf-8') == 'origem'
+        assert (tmp_path / nome).read_bytes() == b'novo'
+    else:
+        resultado = win_move._publicar_ausente_experimental(journal)
+        assert resultado == {'arquivo': identidade, 'pais': plano['pais_destino']}
+        assert not origem.exists() and not (tmp_path / nome).exists()
+        assert (tmp_path / plano['quarentena']).read_text(encoding='utf-8') == 'origem'
+        assert destino.read_text(encoding='utf-8') == 'novo'
+        revisao = win_move._revisar_ausente_experimental(journal)
+        assert revisao['destino_publicado'] and revisao['conteudo_destino_anterior'] is None
+        with pytest.raises(ValueError, match='confirmação'):
+            win_move._recuperar_ausente_experimental(journal, revisao['revisao'])
+        win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+        assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
+        assert not (tmp_path / plano['quarentena']).exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_recuperacao_destino_ausente_apos_falha_entre_renames(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino-novo.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+        'stage': 'passe1-stage-' + 'e' * 32, 'quarentena': 'passe1-move-' + 'f' * 32,
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        pass
+    with win_move._preparar_stage_registrado(journal) as (fd, _pai, _nome, _identidade):
+        win_move._gravar_handle(fd, b'novo')
+    renomear = win_move._renomear_handle
+    chamadas = []
+
+    def interromper(*args):
+        chamadas.append(1)
+        if len(chamadas) == 2:
+            raise OSError('interrupção simulada')
+        return renomear(*args)
+
+    monkeypatch.setattr(win_move, '_renomear_handle', interromper)
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        win_move._publicar_ausente_experimental(journal)
+    assert not origem.exists() and not destino.exists()
+    assert (tmp_path / plano['quarentena']).read_text(encoding='utf-8') == 'origem'
+    monkeypatch.setattr(win_move, '_renomear_handle', renomear)
+    revisao = win_move._revisar_ausente_experimental(journal)
+    assert revisao['stage_preparado'] and revisao['origem_em_quarentena']
+    def falhar_recuperacao(*_args):
+        raise OSError('falha após exclusão do stage')
+    monkeypatch.setattr(win_move, '_renomear_handle', falhar_recuperacao)
+    with pytest.raises(OSError, match='falha após exclusão'):
+        win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+    assert not (tmp_path / plano['stage']).exists() and not origem.exists()
+    monkeypatch.setattr(win_move, '_renomear_handle', renomear)
+    revisao = win_move._revisar_ausente_experimental(journal)
+    assert not revisao['stage_preparado'] and not revisao['destino_publicado']
+    win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
+    assert not (tmp_path / plano['stage']).exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('fase', ['origem', 'destino'])
+def test_queda_na_publicacao_destino_ausente_pode_ser_recuperada(tmp_path, fase):
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+        'stage': 'passe1-stage-' + '1' * 32, 'quarentena': 'passe1-move-' + '2' * 32,
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        pass
+    with win_move._preparar_stage_registrado(journal) as (fd, _pai, _nome, _identidade):
+        win_move._gravar_handle(fd, b'novo')
+    programa = '''
+import os, sys
+from passe1_engine import win_move
+journal, fase = sys.argv[1:]
+renomear = win_move._renomear_handle
+chamadas = []
+def interromper(*args):
+    renomear(*args)
+    chamadas.append(1)
+    if len(chamadas) == (1 if fase == 'origem' else 2):
+        os._exit(91)
+win_move._renomear_handle = interromper
+win_move._publicar_ausente_experimental(journal)
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(journal), fase], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    assert not origem.exists()
+    revisao = win_move._revisar_ausente_experimental(journal)
+    assert revisao['destino_publicado'] == (fase == 'destino')
+    win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
+    assert not (tmp_path / plano['stage']).exists()
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
