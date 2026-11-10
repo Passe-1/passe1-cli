@@ -14,10 +14,16 @@ def substituir(caminho, anterior, novo):
 
 
 def remover(caminho, anterior):
-    raise RuntimeError("Remoção segura Windows ainda não está disponível.")
+    if os.name != "nt":
+        raise RuntimeError("Operação Windows indisponível nesta plataforma.")
+    _operar(caminho, anterior, None)
 
 
 def _criar(caminho, conteudo):
+    _operar(caminho, None, conteudo)
+
+
+def _operar(caminho, anterior, conteudo):
     import ctypes
     from ctypes import wintypes
 
@@ -40,6 +46,7 @@ def _criar(caminho, conteudo):
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(BY_HANDLE_FILE_INFORMATION)]
     kernel.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    kernel.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
     kernel.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(OBJECT_ATTRIBUTES), ctypes.POINTER(IO_STATUS_BLOCK), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
@@ -56,7 +63,7 @@ def _criar(caminho, conteudo):
             raise ValueError("Link ou tipo de arquivo não permitido.")
         if not diretorio and info.nNumberOfLinks != 1:
             raise ValueError("Arquivo com múltiplos links não permitido.")
-    def relativo(pai, nome, diretorio):
+    def relativo(pai, nome, diretorio, remover_alvo=False):
         buffer = ctypes.create_unicode_buffer(nome)
         tamanho = len(nome.encode("utf-16-le"))
         palavra = UNICODE_STRING(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
@@ -65,9 +72,11 @@ def _criar(caminho, conteudo):
         ios = IO_STATUS_BLOCK()
         # Não compartilhar DELETE impede que ancestrais sejam renomeados durante a operação.
         opcoes = 0x00200000 | 0x20 | (1 if diretorio else 0x40)
-        status = ntdll.NtCreateFile(ctypes.byref(resultado), 0x100081 if diretorio else 0x40100100,
-                                   ctypes.byref(atributos), ctypes.byref(ios), None, 0, 1 | 2,
-                                   1 if diretorio else 2, opcoes, None, 0)
+        acesso = 0x100081 if diretorio else (0x80110100 if remover_alvo else 0x40110100)
+        status = ntdll.NtCreateFile(ctypes.byref(resultado), acesso,
+                                   ctypes.byref(atributos), ctypes.byref(ios), None, 0,
+                                   1 | 2 if diretorio else 0,
+                                   1 if diretorio or remover_alvo else 2, opcoes, None, 0)
         if status < 0:
             raise OSError(f"NtCreateFile falhou: 0x{status & 0xffffffff:08x}")
         handles.append(resultado.value)
@@ -78,7 +87,23 @@ def _criar(caminho, conteudo):
         pai = root
         for parte in partes[1:-1]:
             pai = relativo(pai, parte, True)
-        arquivo = relativo(pai, partes[-1], False)
+        arquivo = relativo(pai, partes[-1], False, remover_alvo=anterior is not None)
+        if anterior is not None:
+            partes_lidas = []
+            while True:
+                buffer = ctypes.create_string_buffer(65536)
+                lidos = wintypes.DWORD()
+                if not kernel.ReadFile(arquivo, buffer, len(buffer), ctypes.byref(lidos), None):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if not lidos.value:
+                    break
+                partes_lidas.append(buffer.raw[:lidos.value])
+            if b''.join(partes_lidas).decode('utf-8') != anterior:
+                raise ValueError("O arquivo mudou após a aprovação.")
+            excluir = wintypes.BOOL(True)
+            if not kernel.SetFileInformationByHandle(arquivo, 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            return
         try:
             dados = conteudo.encode('utf-8')
             buffer = ctypes.create_string_buffer(dados)

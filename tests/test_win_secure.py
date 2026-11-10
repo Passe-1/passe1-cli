@@ -28,3 +28,26 @@ def test_recusa_symlink_ancestral(tmp_path):
     with pytest.raises((OSError, ValueError)):
         substituir(dentro / 'alias' / 'novo', None, 'x')
     assert not (fora / 'novo').exists()
+
+
+def test_remover_so_se_conteudo_igual(tmp_path):
+    from passe1_engine.win_secure import remover
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    with pytest.raises(ValueError):
+        remover(alvo, 'diferente')
+    assert alvo.read_text(encoding='utf-8') == 'antes'
+    remover(alvo, 'antes')
+    assert not alvo.exists()
+
+
+def test_remover_recusa_hardlink(tmp_path):
+    from passe1_engine.win_secure import remover
+    alvo = tmp_path / 'real.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    alias = tmp_path / 'alias.txt'
+    os.link(alvo, alias)
+    with pytest.raises(ValueError):
+        remover(alias, 'antes')
+    assert alvo.read_text(encoding='utf-8') == 'antes'
+    assert alias.exists()
