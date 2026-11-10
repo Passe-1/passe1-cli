@@ -825,7 +825,43 @@ def _revisao_ausente_fixa(journal):
         yield plano, fd_origem, pai_origem, fd_stage, atual, guardada, preparado, publicado, revisao
 
 
+@contextmanager
+def _revisao_stage_inicial_fixa(journal):
+    """Revisa estágio sem ID durável, preservando-o para inspeção manual."""
+    with _abrir_plano_fixo(journal) as (arquivo, identidade, plano):
+        nome, quarentena = plano.get('stage'), plano.get('quarentena')
+        if (plano.get('destino_ausente') is not True
+                or not isinstance(nome, str) or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome)
+                or not isinstance(quarentena, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', quarentena)):
+            raise ValueError('Journal inicial de destino ausente inválido.')
+        if os.path.lexists(str(arquivo) + '.stage'):
+            raise ValueError('Registro de stage surgiu durante a revisão.')
+        origem, destino = Path(plano['origem']), Path(plano['destino'])
+        if os.path.lexists(destino) or os.path.lexists(origem.with_name(quarentena)):
+            raise ValueError('Origem ou destino está em estado não reconhecido.')
+        stage = destino.with_name(nome)
+        with _origem_fixa(plano):
+            presente = os.path.lexists(stage)
+            estado = {
+                'journal': list(identidade), 'plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
+                'stage_sem_registro': presente,
+            }
+            revisao = hashlib.sha256(json.dumps(estado, sort_keys=True).encode('utf-8')).hexdigest()
+            yield plano, stage, presente, revisao
+
+
 def _revisar_ausente_experimental(journal):
+    if not os.path.lexists(str(journal) + '.stage'):
+        with _revisao_stage_inicial_fixa(journal) as (plano, stage, presente, revisao):
+            token = secrets.token_urlsafe(32)
+            if len(_revisoes) >= 32:
+                del _revisoes[next(iter(_revisoes))]
+            _revisoes[token] = revisao
+            return {'revisao': token, 'origem': plano['origem'], 'destino': plano['destino'],
+                    'conteudo_origem': plano['conteudo_origem'], 'conteudo_destino_anterior': None,
+                    'conteudo_destino_atual': b'', 'origem_em_quarentena': False,
+                    'stage_preparado': presente, 'destino_publicado': False,
+                    'stage_caminho': str(stage), 'requer_limpeza_manual': presente}
     with _revisao_ausente_fixa(journal) as (plano, _, _, _, atual, guardada, preparado, publicado, revisao):
         token = secrets.token_urlsafe(32)
         if len(_revisoes) >= 32:
@@ -845,6 +881,11 @@ def _recuperar_ausente_experimental(journal, revisao, *, confirmado=False):
     esperada = _revisoes.pop(revisao, None)
     if esperada is None:
         raise ValueError('Revisão inválida ou já utilizada.')
+    if not os.path.lexists(str(journal) + '.stage'):
+        with _revisao_stage_inicial_fixa(journal) as (_, stage, presente, atual):
+            if not hmac.compare_digest(esperada, atual):
+                raise ValueError('Estado mudou desde a revisão; recuperação recusada.')
+            return {'stage_preservado': presente, 'stage_caminho': str(stage) if presente else None}
     with _revisao_ausente_fixa(journal) as (plano, fd_origem, pai_origem, fd_stage, _, guardada, _, _, atual):
         if not hmac.compare_digest(esperada, atual):
             raise ValueError('Estado mudou desde a revisão; recuperação recusada.')
@@ -852,6 +893,7 @@ def _recuperar_ausente_experimental(journal, revisao, *, confirmado=False):
             _marcar_exclusao_journal(fd_stage)
         if guardada:
             _renomear_handle(fd_origem, pai_origem, Path(plano['origem']).name)
+    return {'stage_preservado': False, 'stage_caminho': None}
 
 
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):

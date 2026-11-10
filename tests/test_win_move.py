@@ -435,7 +435,7 @@ def test_queda_durante_preparacao_de_stage_preserva_origem(tmp_path, fase):
         'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
         'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
         'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
-        'stage': 'passe1-stage-' + 'b' * 32,
+        'stage': 'passe1-stage-' + 'b' * 32, 'quarentena': 'passe1-move-' + '9' * 32,
     }
     with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
         pass
@@ -457,6 +457,13 @@ os._exit(91)
     assert registro.exists() == (fase == 'apos-registro')
     if registro.exists():
         assert json.loads(win_secure._ler_journal(registro)['conteudo'])['stage'] == plano['stage']
+    else:
+        revisao = win_move._revisar_ausente_experimental(journal)
+        assert revisao['requer_limpeza_manual'] and revisao['stage_caminho'] == str(tmp_path / plano['stage'])
+        resultado = win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+        assert resultado['stage_preservado'] and resultado['stage_caminho'] == str(tmp_path / plano['stage'])
+        assert (tmp_path / plano['stage']).read_bytes() == b'novo'
+        assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
