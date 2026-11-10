@@ -83,6 +83,38 @@ def test_link_final_nao_le_nem_altera_alvo(tmp_path):
     assert win_credentials.ler(alvo) == b'original'
 
 
+def test_falha_de_gravacao_remove_credencial_nova_incompleta(tmp_path, monkeypatch):
+    import ctypes
+
+    from passe1_engine import win_credentials
+
+    carregar = ctypes.WinDLL
+
+    class Falha:
+        argtypes = None
+
+        def __call__(self, *_args):
+            return 0
+
+    class Kernel:
+        def __init__(self, original):
+            self.original = original
+            self.WriteFile = Falha()
+
+        def __getattr__(self, nome):
+            return getattr(self.original, nome)
+
+    def carregar_interceptado(nome, *args, **kwargs):
+        biblioteca = carregar(nome, *args, **kwargs)
+        return Kernel(biblioteca) if nome == 'kernel32' else biblioteca
+
+    monkeypatch.setattr(ctypes, 'WinDLL', carregar_interceptado)
+    arquivo = tmp_path / 'session'
+    with pytest.raises(OSError, match='gravar a credencial'):
+        win_credentials.gravar(arquivo, b'credencial-ficticia')
+    assert not arquivo.exists()
+
+
 def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch):
     import passe1
     from passe1_engine import launcher, win_credentials
