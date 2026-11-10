@@ -6,17 +6,18 @@ pytestmark = pytest.mark.skipif(os.name != 'nt', reason='requer Windows')
 
 
 def test_criar_sem_substituir(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot_pais, substituir
     destino = tmp_path / 'novo.txt'
-    substituir(destino, None, 'conteúdo')
+    identidade = snapshot_pais(destino)
+    substituir(destino, None, 'conteúdo', identidade=identidade)
     assert destino.read_text(encoding='utf-8') == 'conteúdo'
     with pytest.raises((OSError, ValueError)):
-        substituir(destino, None, 'sobrescrito')
+        substituir(destino, None, 'sobrescrito', identidade=identidade)
     assert destino.read_text(encoding='utf-8') == 'conteúdo'
 
 
 def test_recusa_symlink_ancestral(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot_pais, substituir
     fora = tmp_path / 'fora'
     fora.mkdir()
     dentro = tmp_path / 'projeto'
@@ -26,7 +27,7 @@ def test_recusa_symlink_ancestral(tmp_path):
     except OSError:
         pytest.skip('criação de symlink indisponível no runner')
     with pytest.raises((OSError, ValueError)):
-        substituir(dentro / 'alias' / 'novo', None, 'x')
+        substituir(dentro / 'alias' / 'novo', None, 'x', identidade=snapshot_pais(dentro / 'alias' / 'novo'))
     assert not (fora / 'novo').exists()
 
 
@@ -97,22 +98,22 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
 
 
 def test_criacao_falha_remove_arquivo_incompleto(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot_pais, substituir
     class ConteudoInvalido:
         def encode(self, _):
             raise RuntimeError('falha simulada')
     alvo = tmp_path / 'incompleto.txt'
     with pytest.raises(RuntimeError, match='falha simulada'):
-        substituir(alvo, None, ConteudoInvalido())
+        substituir(alvo, None, ConteudoInvalido(), identidade=snapshot_pais(alvo))
     assert not alvo.exists()
 
 
 def test_recusa_stream_alternativo(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot_pais, substituir
     alvo = tmp_path / 'normal.txt'
     alvo.write_text('original', encoding='utf-8')
     with pytest.raises((OSError, ValueError)):
-        substituir(str(alvo) + ':oculto', None, 'x')
+        substituir(str(alvo) + ':oculto', None, 'x', identidade=snapshot_pais(str(alvo) + ':oculto'))
     assert alvo.read_text(encoding='utf-8') == 'original'
 
 

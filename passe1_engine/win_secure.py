@@ -332,10 +332,6 @@ def remover(caminho, anterior, *, identidade=None):
     _operar(caminho, anterior, None, identidade_previa=identidade)
 
 
-def _criar(caminho, conteudo):
-    _operar(caminho, None, conteudo)
-
-
 def recuperar(caminho):
     """Restaura explicitamente backup de edição interrompida do mesmo arquivo."""
     arquivo = _journal_path(caminho)
