@@ -8,7 +8,7 @@ from runpy import run_path
 from setuptools import setup
 from wheel.bdist_wheel import bdist_wheel
 
-tag_macos = run_path("scripts/wheel_tag.py")["tag_macos"]
+ferramentas_tag = run_path("scripts/wheel_tag.py")
 
 
 class WheelNativo(bdist_wheel):
@@ -19,7 +19,9 @@ class WheelNativo(bdist_wheel):
     def get_tag(self):
         _, _, plataforma = super().get_tag()
         if sys.platform == "darwin":
-            plataforma = tag_macos(plataforma, platform.machine())
+            binarios = Path("passe1_engine/bin")
+            minimos = [ferramentas_tag["minimo_binario"](binarios / nome) for nome in ("opencode", "rg")]
+            plataforma = ferramentas_tag["tag_macos"](plataforma, platform.machine(), minimos)
         return "py3", "none", plataforma
 
 
