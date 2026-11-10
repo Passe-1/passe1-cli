@@ -53,44 +53,71 @@ def buscar(raiz, padrao, incluir='*', limite=100):
 
 
 def buscar_candidatos(padrao, caminhos, ripgrep, limite=100):
-    """Reexecuta ripgrep em cópias verificadas; nunca usa o texto da busca inicial."""
+    """Pesquisa stdin ancorado e só retorna resultados após validação do handle."""
     import json
     import subprocess
-    import tempfile
+    import threading
 
     resultados = []
     for nome in dict.fromkeys(caminhos):
         caminho = Path(nome)
         if _sensivel(caminho):
             continue
+        processo = None
+        leitor = None
+        locais = []
+        erros = []
         try:
-            with tempfile.TemporaryDirectory(prefix='passe1-grep-') as privado, \
-                    tempfile.SpooledTemporaryFile(max_size=1024 * 1024, dir=privado) as seguro:
+            processo = subprocess.Popen(
+                [ripgrep, '--no-config', '--json', '--max-columns', '2000',
+                 '--max-columns-preview', '--', padrao, '-'],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+            def ler_saida():
                 try:
-                    secure_stream.transmitir(caminho, seguro)
-                except (OSError, ValueError, RuntimeError):
-                    continue
-                seguro.seek(0)
-                processo = subprocess.run(
-                    [ripgrep, '--no-config', '--json', '--max-count', str(limite),
-                     '--max-columns', '2000', '--max-columns-preview', '--', padrao, '-'],
-                    stdin=seguro, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-                )
-            if processo.returncode not in (0, 1):
+                    for linha in processo.stdout:
+                        evento = json.loads(linha)
+                        if evento.get('type') != 'match' or len(locais) >= limite:
+                            continue
+                        dado = evento['data']
+                        texto = dado['lines'].get('text')
+                        if texto is not None:
+                            locais.append((nome, dado['line_number'], texto.rstrip('\r\n')))
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    erros.append(exc)
+            leitor = threading.Thread(target=ler_saida, daemon=True)
+            leitor.start()
+            try:
+                secure_stream.transmitir(caminho, processo.stdin)
+            except BrokenPipeError:
+                codigo = processo.wait()
+                leitor.join()
+                if codigo not in (0, 1):
+                    raise ValueError('Ripgrep recusou a expressão de busca.')
+                continue
+            except ValueError:
+                continue
+            processo.stdin.close()
+            codigo = processo.wait()
+            leitor.join()
+            if erros or codigo not in (0, 1):
                 raise ValueError('Ripgrep recusou a expressão de busca.')
-            for linha in processo.stdout.splitlines():
-                evento = json.loads(linha)
-                if evento.get('type') != 'match':
-                    continue
-                dado = evento['data']
-                texto = dado['lines'].get('text')
-                if texto is None:
-                    continue
-                resultados.append((nome, dado['line_number'], texto.rstrip('\r\n')))
-                if len(resultados) >= limite:
-                    return resultados
-        except (OSError, UnicodeError, RuntimeError):
+            resultados.extend(locais[:limite - len(resultados)])
+            if len(resultados) >= limite:
+                return resultados
+        except (OSError, RuntimeError):
             continue
+        finally:
+            if processo is not None:
+                if processo.poll() is None:
+                    processo.kill()
+                    processo.wait()
+                if processo.stdin and not processo.stdin.closed:
+                    processo.stdin.close()
+                if leitor is not None:
+                    leitor.join()
+                if processo.stdout:
+                    processo.stdout.close()
     return resultados
 
 

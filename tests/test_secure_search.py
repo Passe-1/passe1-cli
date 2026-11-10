@@ -64,44 +64,42 @@ def test_ripgrep_processa_somente_conteudo_validado(tmp_path, monkeypatch):
     assert secure_search.buscar_candidatos('SEGREDO_FIXTURE', [str(alias)], ripgrep) == []
 
 
-def test_temporario_tem_permissoes_restritas_e_e_removido(tmp_path, monkeypatch):
+def test_busca_sem_copia_temporaria(tmp_path, monkeypatch):
     import shutil
-    import stat
-    import subprocess
-    ripgrep = shutil.which('rg')
-    if not ripgrep or os.name != 'posix':
-        pytest.skip('Validação de permissões POSIX requer ripgrep')
-    arquivo = tmp_path / 'publico.txt'
-    arquivo.write_text('texto de teste')
-    original = subprocess.run
-    vistos = []
-    def verificar(*args, **kwargs):
-        handle = kwargs['stdin']
-        diretorio = handle._TemporaryFileArgs['dir']
-        assert stat.S_IMODE(os.stat(diretorio).st_mode) == 0o700
-        assert stat.S_IMODE(os.fstat(handle.fileno()).st_mode) == 0o600
-        vistos.append(diretorio)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(subprocess, 'run', verificar)
-    assert secure_search.buscar_candidatos('texto', [str(arquivo)], ripgrep)
-    assert vistos and all(not os.path.exists(pasta) for pasta in vistos)
-
-
-def test_temporarios_removidos_quando_ripgrep_falha(tmp_path, monkeypatch):
-    import subprocess
     import tempfile
+    ripgrep = shutil.which('rg')
+    if not ripgrep:
+        pytest.skip('ripgrep não disponível')
     arquivo = tmp_path / 'publico.txt'
     arquivo.write_text('texto de teste')
-    original = tempfile.TemporaryDirectory
-    criados = []
-    def diretorio(*args, **kwargs):
-        item = original(*args, **kwargs)
-        criados.append(item.name)
-        return item
-    def falhar(*args, **kwargs):
-        return subprocess.CompletedProcess(args[0], 2, b'', b'erro')
-    monkeypatch.setattr(tempfile, 'TemporaryDirectory', diretorio)
-    monkeypatch.setattr(subprocess, 'run', falhar)
-    with pytest.raises(ValueError):
-        secure_search.buscar_candidatos('texto', [str(arquivo)], 'rg')
-    assert criados and all(not os.path.exists(pasta) for pasta in criados)
+    def proibido(*args, **kwargs):
+        raise AssertionError('A busca não deve criar cópias temporárias')
+    monkeypatch.setattr(tempfile, 'TemporaryDirectory', proibido)
+    assert secure_search.buscar_candidatos('texto', [str(arquivo)], ripgrep)
+
+
+def test_descarta_resultados_se_validacao_final_falhar(tmp_path, monkeypatch):
+    import shutil
+    from passe1_engine import secure_stream
+    ripgrep = shutil.which('rg')
+    if not ripgrep:
+        pytest.skip('ripgrep não disponível')
+    arquivo = tmp_path / 'publico.txt'
+    arquivo.write_text('texto de teste')
+    def leitura_invalida(caminho, destino, *args):
+        destino.write(b'SEGREDO_FIXTURE')
+        destino.flush()
+        raise ValueError('arquivo mudou')
+    monkeypatch.setattr(secure_stream, 'transmitir', leitura_invalida)
+    assert secure_search.buscar_candidatos('SEGREDO_FIXTURE', [str(arquivo)], ripgrep) == []
+
+
+def test_regex_invalida_retorna_erro(tmp_path):
+    import shutil
+    ripgrep = shutil.which('rg')
+    if not ripgrep:
+        pytest.skip('ripgrep não disponível')
+    arquivo = tmp_path / 'publico.txt'
+    arquivo.write_text('conteudo')
+    with pytest.raises(ValueError, match='expressão'):
+        secure_search.buscar_candidatos('[', [str(arquivo)], ripgrep)

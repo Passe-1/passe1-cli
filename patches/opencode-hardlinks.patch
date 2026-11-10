@@ -68,7 +68,7 @@ index 7f593550..ca5bcf1f 100644
  
      const fetch = Effect.fnUntraced(function* (url: string) {
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 3f89a639..d55de042 100644
+index 3f89a639..929a0aac 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -7,6 +7,7 @@ import { InstanceState } from "@/effect/instance-state"
@@ -156,16 +156,20 @@ index 3f89a639..d55de042 100644
                newContent: "",
                type: "delete",
                diff: deleteDiff,
-@@ -218,41 +220,35 @@ export const ApplyPatchTool = Tool.define(
+@@ -216,43 +218,39 @@ export const ApplyPatchTool = Tool.define(
+ 
+       // Apply the changes
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
++      let formattingSkipped = false
  
        for (const change of fileChanges) {
 +        yield* verificar(afs, change.filePath)
 +        if (change.movePath) yield* verificar(afs, change.movePath)
          const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
 +        const original = Bom.join(change.oldContent, change.oldBom ?? false)
-+        const formatted = edited ? yield* formatarSeguro(format, edited, Bom.join(change.newContent, change.bom)) : ""
-+        const content = Bom.join(Bom.split(formatted).text, change.bom)
++        const formatted = edited ? yield* formatarSeguro(format, edited, Bom.join(change.newContent, change.bom)) : { content: "", skipped: false }
++        formattingSkipped ||= formatted.skipped
++        const content = Bom.join(Bom.split(formatted.content).text, change.bom)
          switch (change.type) {
            case "add":
 -            // Create parent directories (recursive: true is safe on existing/root dirs)
@@ -208,8 +212,16 @@ index 3f89a639..d55de042 100644
            yield* events.publish(FileSystem.Event.Edited, { file: edited })
          }
        }
+@@ -282,6 +280,7 @@ export const ApplyPatchTool = Tool.define(
+         return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
+       })
+       let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
++      if (formattingSkipped) output += "\nA formatação automática não foi executada porque sua configuração não pode ser preservada com segurança. Execute o formatador manualmente após aprovar o comando."
+ 
+       for (const change of fileChanges) {
+         if (change.type === "delete") continue
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index a92e4720..eb85869c 100644
+index a92e4720..2f8e08e4 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
 @@ -16,6 +16,7 @@ import { Format } from "../format"
@@ -220,7 +232,7 @@ index a92e4720..eb85869c 100644
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "@/util/bom"
  
-@@ -81,6 +82,7 @@ export const EditTool = Tool.define(
+@@ -81,10 +82,12 @@ export const EditTool = Tool.define(
              ? params.filePath
              : path.join(instance.directory, params.filePath)
            yield* assertExternalDirectoryEffect(ctx, filePath)
@@ -228,7 +240,12 @@ index a92e4720..eb85869c 100644
  
            let diff = ""
            let contentOld = ""
-@@ -108,10 +110,10 @@ export const EditTool = Tool.define(
+           let contentNew = ""
++          let formattingSkipped = false
+           yield* lock(filePath).withPermits(1)(
+             Effect.gen(function* () {
+               if (params.oldString === "") {
+@@ -108,10 +111,11 @@ export const EditTool = Tool.define(
                      diff,
                    },
                  })
@@ -238,12 +255,13 @@ index a92e4720..eb85869c 100644
 -                }
 +                yield* verificar(afs, filePath)
 +                const formatted = yield* formatarSeguro(format, filePath, Bom.join(contentNew, desiredBom))
-+                contentNew = Bom.split(formatted).text
++                contentNew = Bom.split(formatted.content).text
++                formattingSkipped ||= formatted.skipped
 +                yield* Effect.promise(() => gravarSeguro(filePath, null, Bom.join(contentNew, desiredBom)))
                  yield* events.publish(FileSystem.Event.Edited, { file: filePath })
                  yield* events.publish(Watcher.Event.Updated, {
                    file: filePath,
-@@ -123,7 +125,7 @@ export const EditTool = Tool.define(
+@@ -123,7 +127,7 @@ export const EditTool = Tool.define(
                const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
                if (!info) throw new Error(`File ${filePath} not found`)
                if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
@@ -252,7 +270,7 @@ index a92e4720..eb85869c 100644
                contentOld = source.text
  
                const ending = detectLineEnding(contentOld)
-@@ -152,10 +154,10 @@ export const EditTool = Tool.define(
+@@ -152,10 +156,11 @@ export const EditTool = Tool.define(
                  },
                })
  
@@ -262,13 +280,22 @@ index a92e4720..eb85869c 100644
 -              }
 +              yield* verificar(afs, filePath)
 +              const formatted = yield* formatarSeguro(format, filePath, Bom.join(contentNew, desiredBom))
-+              contentNew = Bom.split(formatted).text
++              contentNew = Bom.split(formatted.content).text
++              formattingSkipped ||= formatted.skipped
 +              yield* Effect.promise(() => gravarSeguro(filePath, Bom.join(contentOld, source.bom), Bom.join(contentNew, desiredBom)))
                yield* events.publish(FileSystem.Event.Edited, { file: filePath })
                yield* events.publish(Watcher.Event.Updated, {
                  file: filePath,
+@@ -194,6 +199,7 @@ export const EditTool = Tool.define(
+           })
+ 
+           let output = "Edit applied successfully."
++          if (formattingSkipped) output += "\nA formatação automática não foi executada porque sua configuração não pode ser preservada com segurança. Execute o formatador manualmente após aprovar o comando."
+           yield* lsp.touchFile(filePath, "document")
+           const diagnostics = yield* lsp.diagnostics()
+           const normalizedFilePath = FSUtil.normalizePath(filePath)
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 6ea67124..37e70ced 100644
+index 6ea67124..56deaa7f 100644
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
 @@ -3,7 +3,9 @@ import { Effect, Schema } from "effect"
@@ -289,7 +316,7 @@ index 6ea67124..37e70ced 100644
      return {
        description: DESCRIPTION,
        parameters: Parameters,
-@@ -60,30 +63,20 @@ export const GrepTool = Tool.define(
+@@ -60,30 +63,19 @@ export const GrepTool = Tool.define(
            const search = FSUtil.resolve(requested)
            const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
            const cwd = info?.type === "Directory" ? search : path.dirname(search)
@@ -310,17 +337,17 @@ index 6ea67124..37e70ced 100644
 -            text: item.text,
 -          }))
 +          const entries = yield* ripgrep.find({ cwd, pattern: params.include ?? "*", hidden: true, follow: false, limit: 10000 })
-+          const rows = entries.map((item) => ({ path: path.resolve(requestedInfo?.type === "Directory" ? requested : path.dirname(requested), item.path) })).filter((item) =>
-+            requestedInfo?.type === "Directory" || item.path === path.resolve(requested),
-+          )
-+          if (rows.length === 0) return empty
++          const rows = requestedInfo?.type === "File" ? [{ path: path.resolve(requested) }] : entries.map((item) => ({ path: path.resolve(requested, item.path) }))
++          const incomplete = { title: params.pattern, metadata: { matches: 0, truncated: true }, output: "Busca incompleta: o limite de 10.000 arquivos candidatos foi atingido. Restrinja o caminho ou o padrão de arquivos." }
++          if (rows.length === 0) return entries.length === 10000 ? incomplete : empty
  
            const limit = 100
 -          const truncated = rows.length === limit
 -          const final = rows
+-          if (final.length === 0) return empty
 +          const rgPath = yield* binary.filepath
 +          const final = yield* Effect.promise(() => buscarSeguro(params.pattern, rows.map((item) => item.path), rgPath))
-           if (final.length === 0) return empty
++          if (final.length === 0) return entries.length === 10000 ? incomplete : empty
 +          const truncated = final.length === limit || entries.length === 10000
  
 -          const total = rows.length
@@ -332,15 +359,14 @@ index 6ea67124..37e70ced 100644
            let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..3d48357a
+index 00000000..331bef56
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,134 @@
+@@ -0,0 +1,127 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
 +import path from "path"
-+import os from "os"
 +import type { Interface as FormatInterface } from "../format"
 +
 +// Refuse links whose target can escape the project or share an inode.
@@ -433,17 +459,11 @@ index 00000000..3d48357a
 +}
 +
 +export const formatarSeguro = (format: FormatInterface, file: string, content: string) =>
-+  Effect.acquireUseRelease(
-+    Effect.tryPromise({ try: async () => fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "passe1-format-")), catch: (error) => error instanceof Error ? error : new Error(String(error)) }),
-+    (dir) => Effect.gen(function* () {
-+      const temporary = path.join(dir, "arquivo" + path.extname(file))
-+      yield* Effect.tryPromise({ try: () => fs.writeFile(temporary, content, { mode: 0o600, flag: "wx" }), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
-+      if (!(yield* format.file(temporary))) return content
-+      const bytes = yield* Effect.tryPromise({ try: () => lerSeguro(temporary), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
-+      return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes)
-+    }),
-+    (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
-+  )
++  Effect.gen(function* () {
++    const available = yield* format.status()
++    const skipped = available.some((item) => item.enabled && item.extensions.includes(path.extname(file)))
++    return { content, skipped }
++  })
 +
 +export async function removerSeguro(file: string, previous: string) {
 +  const python = process.env.PASSE1_SECURE_PYTHON
@@ -624,7 +644,7 @@ index 9167cb3e..6ba14f18 100644
  })
  
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 37be6d8c..9233b339 100644
+index 37be6d8c..a4f0f608 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
 @@ -5,6 +5,7 @@ import * as Tool from "./tool"
@@ -656,11 +676,19 @@ index 37be6d8c..9233b339 100644
 -          }
 +          yield* verificar(fs, filepath)
 +          const formatted = yield* formatarSeguro(format, filepath, Bom.join(contentNew, desiredBom))
-+          const safeContent = Bom.join(Bom.split(formatted).text, desiredBom)
++          const safeContent = Bom.join(Bom.split(formatted.content).text, desiredBom)
 +          yield* Effect.promise(() => gravarSeguro(filepath, exists ? Bom.join(contentOld, source.bom) : null, safeContent))
            yield* events.publish(FileSystem.Event.Edited, { file: filepath })
            yield* events.publish(Watcher.Event.Updated, {
              file: filepath,
+@@ -72,6 +74,7 @@ export const WriteTool = Tool.define(
+           })
+ 
+           let output = "Wrote file successfully."
++          if (formatted.skipped) output += "\nA formatação automática não foi executada porque sua configuração não pode ser preservada com segurança. Execute o formatador manualmente após aprovar o comando."
+           yield* lsp.touchFile(filepath, "document")
+           const diagnostics = yield* lsp.diagnostics()
+           const normalizedFilepath = FSUtil.normalizePath(filepath)
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 index 74203615..cfa6da8e 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
@@ -707,7 +735,7 @@ index 46155a50..30e1c05d 100644
      it.instance("creates new file when oldString is empty", () =>
        Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 13858f9f..d23d442d 100644
+index 13858f9f..da1ec5e2 100644
 --- a/packages/opencode/test/tool/grep.test.ts
 +++ b/packages/opencode/test/tool/grep.test.ts
 @@ -1,3 +1,4 @@
@@ -724,10 +752,22 @@ index 13858f9f..d23d442d 100644
    )
  
  const it = testEffect(toolLayer())
-@@ -77,6 +78,19 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
+@@ -77,6 +78,31 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
  })
  
  describe("tool.grep", () => {
++  it.instance("avisa busca incompleta sem resultados no limite de candidatos", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const service = yield* Ripgrep.Service
++    const falso = { ...service, find: () => Effect.succeed(Array.from({ length: 10000 }, (_, i) => ({ path: `pasta${i}/.env`, type: "file" })) as never) }
++    const info = yield* GrepTool.pipe(Effect.provideService(Ripgrep.Service, falso))
++    const grep = yield* info.init()
++    const result = yield* grep.execute({ pattern: "inexistente", path: test.directory }, ctx)
++    expect(result.metadata.matches).toBe(0)
++    expect(result.metadata.truncated).toBe(true)
++    expect(result.output).toContain("Busca incompleta")
++  }))
++
 +  it.instance("não expõe arquivo de credenciais ou hard link", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const segredo = path.join(test.directory, "service-account.json")
@@ -744,7 +784,7 @@ index 13858f9f..d23d442d 100644
    rooted.live("basic search", () =>
      Effect.gen(function* () {
        const info = yield* GrepTool
-@@ -170,7 +184,7 @@ describe("tool.grep", () => {
+@@ -170,7 +196,7 @@ describe("tool.grep", () => {
      }),
    )
  
@@ -753,7 +793,7 @@ index 13858f9f..d23d442d 100644
      Effect.gen(function* () {
        if (process.platform === "win32") return
  
-@@ -214,10 +228,9 @@ describe("tool.grep", () => {
+@@ -214,10 +240,9 @@ describe("tool.grep", () => {
          next,
        )
  
@@ -887,7 +927,7 @@ index c1ef61b2..549bd3ba 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index 4f897dc8..560f1bff 100644
+index 4f897dc8..179bdd8b 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
 @@ -1,6 +1,6 @@
@@ -928,16 +968,26 @@ index 4f897dc8..560f1bff 100644
    describe("new file creation", () => {
      it.instance("writes content to new file", () =>
        Effect.gen(function* () {
-@@ -159,6 +182,13 @@ describe("tool.write", () => {
+@@ -159,6 +182,23 @@ describe("tool.write", () => {
        },
      )
  
-+    it.instance("aplica a transformação do formatador ao conteúdo publicado", () => Effect.gen(function* () {
++    it.instance("avisa quando a formatação não pode ser executada com segurança", () => Effect.gen(function* () {
 +      const test = yield* TestInstance
 +      const arquivo = path.join(test.directory, "formatted.xyz")
-+      yield* run({ filePath: arquivo, content: "antes" })
-+      expect(yield* Effect.promise(() => fs.readFile(arquivo, "utf-8"))).toBe("depois")
++      const result = yield* run({ filePath: arquivo, content: "antes" })
++      expect(yield* Effect.promise(() => fs.readFile(arquivo, "utf-8"))).toBe("antes")
++      expect(result.output).toContain("formatação automática não foi executada")
 +    }), { config: { formatter: { teste: { extensions: [".xyz"], command: ["node", "-e", "require('fs').writeFileSync(process.argv[1], 'depois')", "$FILE"] } } } })
++
++    it.instance("avisa e preserva conteúdo quando Prettier tem configuração de projeto", () => Effect.gen(function* () {
++      const test = yield* TestInstance
++      yield* Effect.promise(() => fs.writeFile(path.join(test.directory, ".prettierrc"), JSON.stringify({ singleQuote: true })))
++      const arquivo = path.join(test.directory, "configurado.js")
++      const result = yield* run({ filePath: arquivo, content: "const texto = \"olá\";\n" })
++      expect(yield* Effect.promise(() => fs.readFile(arquivo, "utf-8"))).toBe("const texto = \"olá\";\n")
++      expect(result.output).toContain("formatação automática não foi executada")
++    }), { config: { formatter: { prettier: { extensions: [".js"], command: [path.resolve(import.meta.dir, "../../node_modules/.bin/prettier"), "--write", "$FILE"] } } } })
 +
      it.instance("returns diff in metadata for existing files", () =>
        Effect.gen(function* () {

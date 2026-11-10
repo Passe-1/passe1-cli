@@ -71,7 +71,7 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
     temporario = tmp_path / 'temporario.txt'
     temporario.write_text('depois', encoding='utf-8')
     invalido = wintypes.HANDLE(-1).value
-    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
+    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 3, None, 3, 0x02000000, None)
     original = kernel.CreateFileW(str(destino), 0xC0000000, 7, None, 3, 0, None)
     novo = kernel.CreateFileW(str(temporario), 0x10000, 7, None, 3, 0, None)
     try:
@@ -126,7 +126,7 @@ def test_diretorio_bloqueado_impede_troca_do_alvo(tmp_path):
     alvo = tmp_path / 'alvo.txt'
     alvo.write_text('original', encoding='utf-8')
     invalido = wintypes.HANDLE(-1).value
-    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
+    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 3, None, 3, 0x02000000, None)
     arquivo = kernel.CreateFileW(str(alvo), 0x80000000, 7, None, 3, 0, None)
     try:
         assert diretorio != invalido and arquivo != invalido
