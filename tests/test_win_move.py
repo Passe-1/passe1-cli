@@ -119,3 +119,81 @@ def test_par_fixo_confere_identidades_e_impede_trocas(tmp_path):
     with pytest.raises(ValueError, match='Conteúdo mudou'), win_move._par_fixo(origem, destino, plano):
         pytest.fail('Não deve aceitar arquivo alterado.')
     assert origem.read_text(encoding='utf-8') == 'origem'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_par_fixo_recusa_troca_de_ancestral_apos_snapshot(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+
+    pasta, movido = tmp_path / 'projeto', tmp_path / 'movido'
+    pasta.mkdir()
+    origem, destino = pasta / 'origem.txt', pasta / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': vd['arquivo'],
+        'pais_origem': vo['pais'], 'pais_destino': vd['pais'],
+    }
+    for nome, texto in [('origem', 'origem'), ('destino', 'destino'), ('novo', 'novo')]:
+        plano['conteudo_' + nome] = texto
+        plano['hash_' + nome] = win_move._digest(texto)
+    snapshot_original = win_move.snapshot_pais
+    tentativa = []
+
+    def trocar(caminho):
+        resultado = snapshot_original(caminho)
+        if not tentativa:
+            try:
+                pasta.rename(movido)
+            except OSError:
+                tentativa.append('bloqueado')
+            else:
+                tentativa.append('trocado')
+                pasta.mkdir()
+                (pasta / 'origem.txt').write_text('origem', encoding='utf-8')
+                (pasta / 'destino.txt').write_text('destino', encoding='utf-8')
+        return resultado
+
+    monkeypatch.setattr(win_move, 'snapshot_pais', trocar)
+    if_erro = False
+    try:
+        with win_move._par_fixo(origem, destino, plano):
+            assert tentativa == ['bloqueado']
+    except (OSError, ValueError):
+        if_erro = True
+    assert tentativa and (tentativa == ['bloqueado'] or if_erro)
+    original = movido if tentativa == ['trocado'] else pasta
+    assert (original / 'origem.txt').read_text(encoding='utf-8') == 'origem'
+    assert (original / 'destino.txt').read_text(encoding='utf-8') == 'destino'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_renomeacao_por_handle_nao_sobrescreve_destino(tmp_path):
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    origem, existente = tmp_path / 'origem.txt', tmp_path / 'existente.txt'
+    origem.write_text('origem', encoding='utf-8')
+    existente.write_text('não sobrescrever', encoding='utf-8')
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    pai = kernel.CreateFileW(str(tmp_path), 0x100084, 3, None, 3, 0x02200000, None)
+    assert pai != wintypes.HANDLE(-1).value
+    handle = kernel.CreateFileW(str(origem), 0xC0010080, 0, None, 3, 0x00200000, None)
+    assert handle != wintypes.HANDLE(-1).value
+    fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+    try:
+        with pytest.raises(OSError):
+            win_move._renomear_handle(fd, pai, existente.name)
+        win_move._renomear_handle(fd, pai, 'quarentena.txt')
+    finally:
+        os.close(fd)
+        kernel.CloseHandle(pai)
+    assert not origem.exists()
+    assert (tmp_path / 'quarentena.txt').read_text(encoding='utf-8') == 'origem'
+    assert existente.read_text(encoding='utf-8') == 'não sobrescrever'

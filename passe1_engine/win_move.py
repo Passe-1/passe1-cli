@@ -191,3 +191,30 @@ def _par_fixo(origem, destino, plano):
             if snapshot_pais(caminho)['pais'] != plano['pais_' + nome]:
                 raise ValueError('Diretório mudou durante a preparação.')
         yield descritores
+
+
+def _renomear_handle(fd, diretorio, nome):
+    """Experimento: renomeia por handle, sem substituir entrada existente."""
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    if not isinstance(nome, str) or nome in ('', '.', '..') or any(c in nome for c in '\\/ :') or nome.endswith('.'):
+        raise ValueError('Nome de quarentena inválido.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class Io(ctypes.Structure):
+        _fields_ = [('Status', ctypes.c_void_p), ('Information', ctypes.c_size_t)]
+
+    class Rename(ctypes.Structure):
+        _fields_ = [('ReplaceIfExists', wintypes.BOOL), ('RootDirectory', wintypes.HANDLE),
+                    ('FileNameLength', wintypes.DWORD), ('FileName', wintypes.WCHAR * (len(nome.encode('utf-16-le')) // 2 + 1))]
+
+    dados = Rename(False, diretorio, len(nome.encode('utf-16-le')), nome)
+    io = Io()
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtSetInformationFile.argtypes = [wintypes.HANDLE, ctypes.POINTER(Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG]
+    ntdll.NtSetInformationFile.restype = ctypes.c_long
+    status = ntdll.NtSetInformationFile(msvcrt.get_osfhandle(fd), ctypes.byref(io), ctypes.byref(dados), ctypes.sizeof(dados), 10)
+    if status < 0:
+        raise OSError(f'NtSetInformationFile falhou: 0x{status & 0xffffffff:08x}')
