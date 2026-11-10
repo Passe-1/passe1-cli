@@ -54,7 +54,7 @@ def test_remover_recusa_hardlink(tmp_path):
 
 
 def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
-    """Verifica se NTFS permite replace atômico mantendo destino bloqueado."""
+    """Verifica substituição relativa ao diretório com alvo aberto."""
     import ctypes
     from ctypes import wintypes
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -71,8 +71,8 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
     temporario = tmp_path / 'temporario.txt'
     temporario.write_text('depois', encoding='utf-8')
     invalido = wintypes.HANDLE(-1).value
-    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 3, None, 3, 0x02000000, None)
-    original = kernel.CreateFileW(str(destino), 0x80000000, 0, None, 3, 0, None)
+    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
+    original = kernel.CreateFileW(str(destino), 0x80000000, 5, None, 3, 0, None)
     novo = kernel.CreateFileW(str(temporario), 0x10000, 7, None, 3, 0, None)
     try:
         assert all(h != invalido for h in (diretorio, original, novo))
@@ -108,3 +108,26 @@ def test_recusa_stream_alternativo(tmp_path):
     with pytest.raises((OSError, ValueError)):
         substituir(str(alvo) + ':oculto', None, 'x')
     assert alvo.read_text(encoding='utf-8') == 'original'
+
+
+def test_diretorio_bloqueado_impede_troca_do_alvo(tmp_path):
+    """Valida se a trava de diretório impede rename concorrente do alvo."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    alvo = tmp_path / 'alvo.txt'
+    alvo.write_text('original', encoding='utf-8')
+    invalido = wintypes.HANDLE(-1).value
+    diretorio = kernel.CreateFileW(str(tmp_path), 0x100081, 1, None, 3, 0x02000000, None)
+    arquivo = kernel.CreateFileW(str(alvo), 0x80000000, 5, None, 3, 0, None)
+    try:
+        assert diretorio != invalido and arquivo != invalido
+        with pytest.raises(OSError):
+            os.rename(alvo, tmp_path / 'trocado.txt')
+    finally:
+        for handle in (arquivo, diretorio):
+            if handle != invalido:
+                kernel.CloseHandle(handle)
