@@ -9,6 +9,7 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -20,6 +21,7 @@ from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
 
 
@@ -98,8 +100,10 @@ class Interface:
         self.conectado = asyncio.Event()
         self.descendentes = {sessao}
         self.estado = 'Conectando'
-        self.transcricao = TextArea(text='', read_only=True, scrollbar=True, wrap_lines=True, focusable=False)
-        self.entrada = TextArea(height=3, multiline=True, prompt='› ', wrap_lines=True)
+        self._largura_transcricao = None
+        self._seguindo = True
+        self.transcricao = TextArea(text='', read_only=True, scrollbar=False, wrap_lines=True, focusable=False, height=lambda: min(18, max(3, self.transcricao.text.count('\n') + 2)))
+        self.entrada = TextArea(height=lambda: min(6, max(1, self.entrada.text.count('\n') + 1)), multiline=True, prompt='❯ ', wrap_lines=True, style='class:entrada')
         teclas = KeyBindings()
 
         @teclas.add('enter')
@@ -122,6 +126,7 @@ class Interface:
 
         @teclas.add('pageup')
         def subir(event):
+            self._seguindo = False
             buffer = self.transcricao.buffer
             buffer.cursor_up(count=max(1, event.app.output.get_size().rows - 6))
 
@@ -129,6 +134,7 @@ class Interface:
         def descer(event):
             buffer = self.transcricao.buffer
             buffer.cursor_down(count=max(1, event.app.output.get_size().rows - 6))
+            self._seguindo = buffer.document.cursor_position_row == buffer.document.line_count - 1
 
         @teclas.add('c-d')
         def sair(event):
@@ -146,14 +152,37 @@ class Interface:
             'subtitulo': 'fg:#5ee6e0' if cores else '',
             'rodape': 'fg:#5ee6e0' if cores else '',
             'entrada': 'bold',
+            'borda': 'fg:#ffd43b' if cores else '',
+            'atividade': 'fg:#ffd43b' if cores else 'bold',
         })
         cabecalho = Window(FormattedTextControl(self._cabecalho), height=2, dont_extend_height=True)
         rodape = Window(FormattedTextControl(self._rodape), height=lambda: len(self._linhas_rodape()), dont_extend_height=True)
-        layout = HSplit([cabecalho, self.transcricao, Window(height=1, char='─'), self.entrada, rodape])
-        self.app = Application(layout=Layout(layout, focused_element=self.entrada), key_bindings=teclas, style=estilo, full_screen=True)
-        self._adicionar('Bem-vindo ao Passe1. Descreva o que deseja fazer no projeto.\n')
+        atividade = Window(FormattedTextControl(self._atividade), height=1, dont_extend_height=True)
+        layout = HSplit([cabecalho, Window(height=1), self.transcricao, atividade, Window(height=1, char='─', style='class:borda'), self.entrada, Window(height=1, char='─', style='class:borda'), rodape])
+        self.app = Application(layout=Layout(layout, focused_element=self.entrada), key_bindings=teclas, style=estilo, full_screen=False, refresh_interval=0.1, before_render=lambda app: self._atualizar_transcricao())
+        self._adicionar('O que vamos construir?\n/ajuda para comandos · /imagem para anexar uma imagem\n')
         if imagens:
             self._adicionar(f'{len(imagens)} imagem(ns) serão enviadas com sua próxima mensagem.\n')
+
+    @property
+    def ocupado(self):
+        return self._ocupado
+
+    @ocupado.setter
+    def ocupado(self, valor):
+        if valor and not getattr(self, '_ocupado', False):
+            self._inicio_atividade = time.monotonic()
+        self._ocupado = valor
+
+    def _atividade(self):
+        if self.interacoes:
+            return FormattedText([('class:atividade', '◆ Aguardando sua confirmação')])
+        if not self.ocupado:
+            return FormattedText([('', '')])
+        decorrido = max(0, time.monotonic() - self._inicio_atividade)
+        quadros = ('·', '✦', '✧', '✦')
+        quadro = quadros[int(decorrido * 8) % len(quadros)]
+        return FormattedText([('class:atividade', f'{quadro} {self.estado}  {int(decorrido)}s  ·  Esc interromper')])
 
     def _cabecalho(self):
         largura = self.app.output.get_size().columns
@@ -165,7 +194,7 @@ class Interface:
 
     def _linhas_rodape(self):
         largura = max(1, self.app.output.get_size().columns - 1)
-        partes = [self.estado, 'Enter enviar', 'Ctrl+O linha', 'Esc parar', 'Ctrl+D sair']
+        partes = [self.estado, 'Enter enviar', 'Ctrl+O linha', 'Esc parar', 'PgUp/PgDn histórico', 'Ctrl+D sair']
         linhas = []
         atual = ''
         for parte in partes:
@@ -186,8 +215,44 @@ class Interface:
         self.linhas.append(_limpar(texto))
         texto = ''.join(self.linhas)[-2_000_000:]
         self.linhas = [texto]
-        self.transcricao.buffer.set_document(Document(texto, cursor_position=len(texto)), bypass_readonly=True)
+        self._atualizar_transcricao(forcar=True)
         self.app.invalidate()
+
+    def _atualizar_transcricao(self, forcar=False):
+        largura = max(1, self.app.output.get_size().columns - 1)
+        if not forcar and largura == self._largura_transcricao:
+            return
+        original = ''.join(self.linhas)
+        anterior_original = getattr(self, '_wrap_original', '')
+        incremental = largura == self._largura_transcricao and original.startswith(anterior_original)
+        if incremental:
+            restante = original[len(anterior_original):]
+            visual = self._wrap_visual
+            colunas, tabcol = self._wrap_colunas, self._wrap_tabcol
+        else:
+            restante, visual, colunas, tabcol = original, '', 0, 0
+        novos = []
+        for caractere in restante:
+            if caractere == '\n':
+                novos.append('\n')
+                colunas, tabcol = 0, 0
+                continue
+            caracteres = ' ' * (4 - tabcol % 4) if caractere == '\t' else caractere
+            for item in caracteres:
+                tamanho = max(0, get_cwidth(item))
+                if colunas and colunas + tamanho > largura:
+                    novos.append('\n')
+                    colunas = 0
+                novos.append(item)
+                colunas += tamanho
+                tabcol += tamanho
+        texto = visual + ''.join(novos)
+        self._wrap_original, self._wrap_visual = original, texto
+        self._wrap_colunas, self._wrap_tabcol = colunas, tabcol
+        self._largura_transcricao = largura
+        anterior = self.transcricao.buffer.cursor_position
+        cursor = len(texto) if self._seguindo else min(anterior, len(texto))
+        self.transcricao.buffer.set_document(Document(texto, cursor_position=cursor), bypass_readonly=True)
 
     async def abortar(self):
         try:
@@ -373,6 +438,11 @@ class Interface:
             if parte.get('sessionID') != self.sessao or self.papeis.get(parte.get('messageID')) != 'assistant':
                 return
             ident = parte.get('id')
+            if not isinstance(ident, str):
+                return
+            if not hasattr(self, '_tipos_partes'):
+                self._tipos_partes = {}
+            self._tipos_partes[ident] = (parte.get('type'), parte.get('messageID'))
             if parte.get('type') == 'text':
                 atual = parte.get('text') or ''
                 anterior = self.partes.get(ident, '')
@@ -386,6 +456,8 @@ class Interface:
                     self._adicionar(f"\n  Ferramenta: {parte.get('tool', 'ação')}\n")
         elif tipo == 'message.part.delta' and props.get('sessionID') == self.sessao and props.get('field') == 'text' and self.papeis.get(props.get('messageID')) == 'assistant':
             ident = props.get('partID')
+            if getattr(self, '_tipos_partes', {}).get(ident) != ('text', props.get('messageID')):
+                return
             delta = props.get('delta') or ''
             self.partes[ident] = self.partes.get(ident, '') + delta
             self._adicionar(delta)
