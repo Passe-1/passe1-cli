@@ -61,7 +61,11 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    ntdll = ctypes.WinDLL('ntdll')
+    class IOStatus(ctypes.Structure):
+        _fields_ = [('Status', ctypes.c_void_p), ('Information', ctypes.c_size_t)]
+    ntdll.NtSetInformationFile.argtypes = [wintypes.HANDLE, ctypes.POINTER(IOStatus), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG]
+    ntdll.NtSetInformationFile.restype = ctypes.c_long
     destino = tmp_path / 'original.txt'
     destino.write_text('antes', encoding='utf-8')
     temporario = tmp_path / 'temporario.txt'
@@ -76,8 +80,9 @@ def test_rename_por_handle_substitui_destino_bloqueado(tmp_path):
         class RenameInfo(ctypes.Structure):
             _fields_ = [('Flags', wintypes.DWORD), ('RootDirectory', wintypes.HANDLE), ('FileNameLength', wintypes.DWORD), ('FileName', wintypes.WCHAR * len(nome))]
         dados = RenameInfo(3, diretorio, len(nome.encode('utf-16-le')), nome)
-        ok = kernel.SetFileInformationByHandle(novo, 22, ctypes.byref(dados), ctypes.sizeof(dados))
-        assert ok, f'FileRenameInfoEx falhou: {ctypes.get_last_error()}'
+        status_io = IOStatus()
+        status = ntdll.NtSetInformationFile(novo, ctypes.byref(status_io), ctypes.byref(dados), ctypes.sizeof(dados), 65)
+        assert status >= 0, f'NtSetInformationFile falhou: 0x{status & 0xffffffff:08x}'
     finally:
         for handle in (novo, original, diretorio):
             if handle != invalido:
