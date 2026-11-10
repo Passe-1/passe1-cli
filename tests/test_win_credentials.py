@@ -211,7 +211,8 @@ def test_outro_usuario_nao_pode_apagar_journal_e_burlar_bloqueio():
     try:
         resultado = subprocess.run(['net', 'user', nome, senha, '/add'], capture_output=True, timeout=30, check=False)
         if resultado.returncode:
-            raise RuntimeError(f'Não foi possível criar conta de teste; código {resultado.returncode}.')
+            detalhe = (resultado.stdout + resultado.stderr).decode('utf-8', errors='replace').replace(senha, '[redigida]')[-1000:]
+            raise RuntimeError(f'Não foi possível criar conta de teste; código {resultado.returncode}: {detalhe}')
         criado = True
         with tempfile.TemporaryDirectory(prefix='passe1-acl-', dir=publico) as pasta:
             pasta = Path(pasta)
