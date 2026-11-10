@@ -22,8 +22,8 @@ spec.loader.exec_module(modulo)
 Gateway = modulo.Gateway
 
 
-def recuperar(journal, projeto, ambiente, destino_existe):
-    processo = PtyProcess.spawn([sys.executable, "-I", "-m", "passe1", "recover-move", str(journal)], cwd=str(projeto), env=ambiente, dimensions=(30, 100))
+def recuperar(journal, ambiente, destino_existe):
+    processo = PtyProcess.spawn([sys.executable, "-I", "-m", "passe1", "recover-move", str(journal)], cwd=tempfile.gettempdir(), env=ambiente, dimensions=(30, 100))
     mensagens = queue.Queue()
 
     def ler():
@@ -33,9 +33,12 @@ def recuperar(journal, projeto, ambiente, destino_existe):
         except (EOFError, OSError):
             mensagens.put(None)
 
-    threading.Thread(target=ler, daemon=True).start()
+    leitor = threading.Thread(target=ler, daemon=True)
+    leitor.start()
     texto = ""
     confirmado = False
+    concluido = False
+    encerrou = False
     prazo = time.monotonic() + 45
     try:
         while time.monotonic() < prazo:
@@ -53,10 +56,22 @@ def recuperar(journal, projeto, ambiente, destino_existe):
                 processo.write("s\r")
                 confirmado = True
             if confirmado and "Recuperação concluída" in texto:
-                return
+                concluido = True
+                break
+        if not concluido:
+            raise RuntimeError(f"Recovery não concluiu: {texto[-2000:]!r}")
+        while processo.pty.isalive():
+            if time.monotonic() >= prazo:
+                raise RuntimeError("Recovery exibiu conclusão, mas o processo não encerrou")
+            time.sleep(0.1)
+        if processo.exitstatus != 0:
+            raise RuntimeError(f"Recovery encerrou com código {processo.exitstatus}")
+        encerrou = True
     finally:
-        processo.close(force=True)
-    raise RuntimeError(f"Recovery não concluiu: {texto[-2000:]!r}")
+        processo.close(force=not encerrou)
+        leitor.join(timeout=10)
+        if leitor.is_alive():
+            raise RuntimeError("Leitor da PTY não encerrou após o fechamento")
 
 
 def executar(destino_existe):
@@ -95,7 +110,7 @@ def executar(destino_existe):
                 raise RuntimeError(f"Move falhou: código={resultado.returncode}, journals={len(journals)}, respostas={respostas[-1200:]!r}, stdout={resultado.stdout[-1200:]!r}, stderr={resultado.stderr[-1200:]!r}")
             if origem.exists() or destino.read_text(encoding="utf-8") != "resultado-ficticio\n":
                 raise RuntimeError("Move não produziu o estado esperado")
-            recuperar(journals[0], projeto, ambiente, destino_existe)
+            recuperar(journals[0], ambiente, destino_existe)
             if origem.read_text(encoding="utf-8") != "origem-ficticia\n":
                 raise RuntimeError("Recovery não restaurou a origem")
             if destino_existe and destino.read_text(encoding="utf-8") != "destino-confidencial-ficticio\n":
