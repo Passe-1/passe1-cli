@@ -1375,7 +1375,7 @@ index c1ef61b2..a510426b 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
 diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
-index a970f85d..c7775c0a 100644
+index a970f85d..ca79b21f 100644
 --- a/packages/opencode/test/tool/shell.test.ts
 +++ b/packages/opencode/test/tool/shell.test.ts
 @@ -4,6 +4,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
@@ -1446,7 +1446,7 @@ index a970f85d..c7775c0a 100644
 +      const updates: string[] = []
 +      let liberated = false
 +      const result = yield* runIn(directory, run(
-+        { command: `${bin} ${quote(script.replaceAll("\\", "/"))} ${quote(barrier.replaceAll("\\", "/"))}` },
++        { command: `${Shell.ps(Shell.acceptable()) ? "& " : ""}${bin} ${quote(script.replaceAll("\\", "/"))} ${quote(barrier.replaceAll("\\", "/"))}` },
 +        { ...ctx, metadata: (input) => Effect.gen(function* () {
 +          const output = (input.metadata as { output?: string })?.output
 +          if (output) updates.push(output)
