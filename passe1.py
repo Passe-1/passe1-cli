@@ -11,8 +11,10 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime
+import difflib
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
@@ -28,7 +30,7 @@ import httpx
 
 from terminal import seguro as _terminal_seguro
 
-VERSAO = "0.2.7"
+VERSAO = "0.3.0"
 SISTEMA_PADRAO = "Você é o assistente do Passe1. Responda SEMPRE em português do Brasil, de forma clara e direta. Nunca misture idiomas na mesma resposta. Só use outro idioma se a pessoa pedir explicitamente."
 BASE_URL_PADRAO = "https://passe.dehor.com.br/v1"
 PREFIXO_CHAVE = "sk-passe1-"
@@ -54,6 +56,40 @@ def _arquivo_chave() -> Path:
     return _dir_config() / "key"
 
 
+def _ler_config_privado(caminho: Path) -> str:
+    if os.name == "nt":
+        from passe1_engine import win_credentials
+        try:
+            return win_credentials.ler(caminho).decode("utf-8")
+        except win_credentials.RecoveryPendente as exc:
+            raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
+        except win_credentials.DiretorioInseguro as exc:
+            raise ValueError(f"Diretório de credenciais inseguro: {caminho.parent}. Use um diretório privado ou ajuste suas permissões.") from exc
+        except ValueError as exc:
+            raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
+    return caminho.read_text(encoding="utf-8")
+
+
+def _gravar_config_privado(caminho: Path, texto: str) -> None:
+    if os.name == "nt":
+        from passe1_engine import win_credentials
+        try:
+            win_credentials.gravar(caminho, texto.encode("utf-8"))
+        except win_credentials.RecoveryPendente as exc:
+            raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
+        except win_credentials.DiretorioInseguro as exc:
+            raise ValueError(f"Diretório de credenciais inseguro: {caminho.parent}. Use um diretório privado ou ajuste suas permissões.") from exc
+        except ValueError as exc:
+            raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
+        return
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(caminho.parent, 0o700)
+    fd = os.open(caminho, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
+        arquivo.write(texto)
+    os.chmod(caminho, 0o600)
+
+
 def _base_url(args_base: str | None = None) -> str:
     base = (args_base or os.environ.get("PASSE1_BASE_URL") or BASE_URL_PADRAO).rstrip("/")
     _origem(base)
@@ -76,33 +112,23 @@ def _ler_chave(base: str | None = None) -> str | None:
         except ValueError:
             return None
         try:
-            binding = (_dir_config() / "key-session").read_text(encoding="utf-8").strip()
+            binding = _ler_config_privado(_dir_config() / "key-session").strip()
         except OSError:
             return None
         if binding != hashlib.sha256(sessao["token"].encode()).hexdigest():
             return None
     try:
-        texto = _arquivo_chave().read_text(encoding="utf-8").strip()
+        texto = _ler_config_privado(_arquivo_chave()).strip()
     except OSError:
         return None
     return texto or None
 
 
 def _guardar_chave(chave: str) -> None:
-    destino = _arquivo_chave()
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destino.parent, 0o700)
-    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, (chave.strip() + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(destino, 0o600)
+    _gravar_config_privado(_arquivo_chave(), chave.strip() + "\n")
     sessao = _ler_sessao()
     if sessao:
-        (_dir_config() / "key-session").write_text(
-            hashlib.sha256(sessao["token"].encode()).hexdigest(), encoding="utf-8"
-        )
+        _gravar_config_privado(_dir_config() / "key-session", hashlib.sha256(sessao["token"].encode()).hexdigest())
 
 
 def _origem(base: str) -> str:
@@ -115,24 +141,22 @@ def _origem(base: str) -> str:
 
 
 def _guardar_sessao(origem: str, nome: str, token: str) -> None:
-    destino = _dir_config() / "session"
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destino.parent, 0o700)
-    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
-        json.dump({"origem": origem, "nome": nome, "token": token}, arquivo)
-    os.chmod(destino, 0o600)
+    _gravar_config_privado(_dir_config() / "session", json.dumps({"origem": origem, "nome": nome, "token": token}))
 
 
 def _ler_sessao() -> dict | None:
     try:
-        dados = json.loads((_dir_config() / "session").read_text(encoding="utf-8"))
+        texto = _ler_config_privado(_dir_config() / "session")
+    except OSError:
+        return None
+    try:
+        dados = json.loads(texto)
         if not isinstance(dados, dict) or not all(isinstance(dados.get(k), str) and dados[k] for k in ("origem", "nome", "token")):
             return None
         if dados["nome"] not in ("passe1_session", "__Host-passe1_session"):
             return None
         return dados
-    except (OSError, ValueError):
+    except ValueError:
         return None
 
 
@@ -387,6 +411,13 @@ def cmd_login(args: argparse.Namespace) -> int:
 
 
 def cmd_logout(args: argparse.Namespace) -> int:
+    from passe1_engine.launcher import limpar_credencial
+    erro_motor = False
+    try:
+        limpar_credencial()
+    except OSError:
+        print("Não foi possível apagar a credencial do motor OpenCode.")
+        erro_motor = True
     sessao = _ler_sessao()
     if sessao:
         try:
@@ -402,12 +433,12 @@ def cmd_logout(args: argparse.Namespace) -> int:
         _arquivo_chave().unlink()
     except FileNotFoundError:
         print("Voce ja estava deslogado.")
-        return 0
+        return 1 if erro_motor else 0
     except OSError as exc:
         print(f"Nao consegui apagar a chave guardada: {exc}.")
         return 1
-    print("Logout ok! Chave apagada deste computador.")
-    return 0
+    print("Chave do CLI apagada deste computador." if erro_motor else "Logout ok! Chave apagada deste computador.")
+    return 1 if erro_motor else 0
 
 
 def cmd_models(args: argparse.Namespace) -> int:
@@ -691,12 +722,31 @@ def _imagens(caminhos: list[str]) -> list[dict]:
     for nome in caminhos:
         try:
             caminho = Path(nome)
-            if not caminho.is_file():
-                raise OSError("Não é arquivo regular.")
-            with caminho.open("rb") as arquivo:
-                dados = arquivo.read(limite - total + 1)
-        except OSError as exc:
-            raise ValueError(f"Não consegui ler a imagem: {nome}.") from exc
+            # macOS expõe /tmp e /var como aliases de sistema para /private.
+            # Preserve a verificação sem seguir links nos demais componentes.
+            if sys.platform == "darwin" and caminho.is_absolute():
+                for alias in (Path("/tmp"), Path("/var")):
+                    try:
+                        if caminho.is_relative_to(alias) and os.readlink(alias) == "private/" + alias.name:
+                            caminho = Path("/private") / caminho.relative_to("/")
+                            break
+                    except OSError:
+                        pass
+            if any(parte.lower().startswith((".passe1-move-", ".passe1-journal-")) for parte in caminho.parts):
+                raise ValueError("Quarentena e journal do Passe1 não podem ser anexados.")
+            from passe1_engine.secure_stream import transmitir
+            class ImagemLimitada(io.BytesIO):
+                def write(self, bloco, restante=limite - total):
+                    if self.tell() + len(bloco) > restante:
+                        raise ValueError("As imagens ultrapassam o limite total de 4 MiB.")
+                    return super().write(bloco)
+            arquivo = ImagemLimitada()
+            transmitir(caminho, arquivo)
+            dados = arquivo.getvalue()
+        except (OSError, RuntimeError) as exc:
+            if "salve e feche o editor" in str(exc):
+                raise ValueError("Imagem em uso para escrita; salve e feche o editor antes de tentar novamente.") from exc
+            raise ValueError(f"Não consegui ler a imagem: {_terminal_seguro(nome)}.") from exc
         total += len(dados)
         if total > limite:
             raise ValueError("As imagens ultrapassam o limite total de 4 MiB.")
@@ -709,7 +759,7 @@ def _imagens(caminhos: list[str]) -> list[dict]:
         elif dados.startswith(b"RIFF") and dados[8:12] == b"WEBP":
             mime = "image/webp"
         else:
-            raise ValueError(f"Formato de imagem inválido em {nome}. Use PNG, JPEG, GIF ou WebP.")
+            raise ValueError(f"Formato de imagem inválido em {_terminal_seguro(nome)}. Use PNG, JPEG, GIF ou WebP.")
         codificado = base64.b64encode(dados).decode("ascii")
         partes.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{codificado}"}})
     return partes
@@ -995,6 +1045,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
 def cmd_agent(args: argparse.Namespace) -> int:
     import agente
 
+    if not args.tarefa and sys.stdin.isatty() and sys.stdout.isatty():
+        from passe1_engine.launcher import iniciar
+        if not args.model and not args.sandbox and not args.base_url and not args.session and not args.image:
+            return iniciar([])
+        return iniciar([], agente=args, tui=True)
+    if os.name == "nt":
+        from passe1_engine.launcher import iniciar
+        return iniciar([], agente=args)
     chave = _ler_chave(_base_url(args.base_url))
     if chave is None:
         return _sem_login()
@@ -1027,6 +1085,127 @@ def cmd_agent(args: argparse.Namespace) -> int:
     if erro:
         print(_terminal_seguro(erro))
     return 0 if sucesso else 1
+
+
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Restaura explicitamente um journal Windows após confirmação no terminal."""
+    if sys.platform != "win32":
+        print("A recuperação de journal está disponível somente no Windows.")
+        return 1
+    if not sys.stdin.isatty():
+        print("A recuperação exige confirmação em um terminal interativo.")
+        return 1
+    caminho = Path(args.caminho).absolute()
+    print(f"Recuperar a versão anterior de {_terminal_seguro(str(caminho))}? A versão atual será substituída.")
+    try:
+        confirmacao = input("Confirmar recuperação? [s/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirmacao = ""
+    if confirmacao not in {"s", "sim"}:
+        print("Recuperação cancelada.")
+        return 1
+    try:
+        from passe1_engine.win_secure import recuperar
+        recuperar(caminho)
+    except (OSError, ValueError, RuntimeError):
+        print("Não foi possível recuperar o arquivo; verifique o journal e a identidade do arquivo.")
+        return 1
+    print("Arquivo recuperado.")
+    return 0
+
+
+def cmd_recover_credential(args: argparse.Namespace) -> int:
+    """Recupera credencial Windows interrompida, com confirmação local."""
+    if os.name != "nt":
+        print("Recuperação de credenciais disponível somente no Windows.")
+        return 1
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("A recuperação de credencial exige um terminal interativo.")
+        return 1
+    caminho = Path(os.path.abspath(args.caminho))
+    raiz = _dir_config()
+    permitidos = [raiz / "key", raiz / "session", raiz / "key-session", raiz / "opencode" / "data" / "opencode" / "auth.json"]
+    if os.path.normcase(str(caminho)) not in {os.path.normcase(os.path.abspath(p)) for p in permitidos}:
+        print("Caminho não corresponde a uma credencial do Passe1.")
+        return 1
+    print("Recuperar credencial local: " + _terminal_seguro(str(caminho)).replace("\n", r"\n"))
+    try:
+        if input("Confirmar recuperação? [s/N] ").strip().lower() not in {"s", "sim"}:
+            print("Recuperação cancelada.")
+            return 1
+        from passe1_engine.win_credentials import recuperar
+        recuperar(caminho, confirmado=True)
+    except (EOFError, KeyboardInterrupt):
+        print("Recuperação cancelada.")
+        return 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        print("Recuperação recusada; dados preservados: " + _terminal_seguro(str(exc)).replace("\n", r"\n"))
+        return 1
+    print("Credencial recuperada.")
+    return 0
+
+
+def cmd_recover_move(args: argparse.Namespace) -> int:
+    """Permite revisão local explícita antes de recuperar uma movimentação."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("A revisão de recuperação exige um terminal interativo.")
+        return 1
+    journal = Path(args.journal)
+    try:
+        if sys.platform == "win32":
+            from passe1_engine import win_move
+            with win_move._abrir_plano_fixo(journal) as (_, _, plano):
+                destino_ausente = plano.get("destino_ausente") is True
+            if destino_ausente:
+                revisao = win_move._revisar_ausente_experimental(journal)
+                recuperar = win_move._recuperar_ausente_experimental
+            else:
+                revisao = win_move._revisar_experimental(journal)
+                recuperar = win_move._recuperar_experimental
+            origem = _terminal_seguro(revisao["origem"]).replace("\n", r"\n")
+            destino = _terminal_seguro(revisao["destino"]).replace("\n", r"\n")
+            bruto_atual = revisao["conteudo_destino_atual"]
+            anterior = revisao["conteudo_destino_anterior"]
+            if len(bruto_atual) + len((anterior or "").encode("utf-8")) + len(revisao["conteudo_origem"].encode("utf-8")) > 1024 * 1024:
+                raise ValueError("A prévia integral excede 1 MiB.")
+            atual = bruto_atual.decode("utf-8", errors="backslashreplace")
+            diff = "".join(difflib.unified_diff(atual.splitlines(keepends=True), (anterior or "").splitlines(keepends=True), fromfile="atual: " + destino, tofile="restaurado: " + destino))
+            if anterior is None:
+                diff += f"Destino originalmente inexistente: {destino}\n"
+            previa = f"Origem a restaurar: {origem}\n" + _terminal_seguro(revisao["conteudo_origem"]) + "\n" + _terminal_seguro(diff or "(sem alterações no destino)\n")
+            if revisao.get("requer_limpeza_manual"):
+                previa += "Stage preservado para inspeção e limpeza manual: " + _terminal_seguro(revisao["stage_caminho"]).replace("\n", r"\n") + "\n"
+        elif os.name == "posix":
+            from passe1_engine import secure_move
+            revisao = secure_move.revisar_local(journal)
+            previa = revisao["previa"]
+            recuperar = secure_move.recuperar
+        else:
+            print("Recuperação de movimentação indisponível nesta plataforma.")
+            return 1
+        print("Revise os caminhos e o conteúdo antes de confirmar:")
+        print(previa)
+        print("O journal não garante proteção contra processo malicioso do mesmo usuário.")
+        print("Um pseudoterminal não garante presença humana; outro processo da mesma conta pode simular a confirmação.")
+        confirmacao = input("Restaurar o estado revisado? [s/N] ").strip().lower()
+        if confirmacao not in {"s", "sim"}:
+            print("Recuperação cancelada; quarentenas preservadas.")
+            return 1
+        resultado = recuperar(journal, revisao["revisao"], confirmado=True)
+        if isinstance(resultado, dict) and resultado.get("stage_preservado"):
+            print("Stage não apagado; inspecione e remova manualmente: " + _terminal_seguro(resultado["stage_caminho"]).replace("\n", r"\n"))
+    except (EOFError, KeyboardInterrupt):
+        print("Recuperação cancelada; quarentenas preservadas.")
+        return 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        if "1 MiB" in str(exc):
+            print("A prévia integral excede 1 MiB; recuperação recusada e journal preservado.")
+        else:
+            print("Recuperação recusada ou incompleta; journal e quarentenas preservados para revisão.")
+        return 1
+    print("Recuperação concluída; preserve o journal para revisão e limpeza manual.")
+    return 0
 
 
 def _backup(caminho: Path) -> Path:
@@ -1109,6 +1288,18 @@ def montar_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--image", action="append", help="Imagem local (repita para anexar mais de uma).")
     p_agent.set_defaults(func=cmd_agent)
 
+    p_recover = sub.add_parser("recover", help="Recuperar uma edição Windows interrompida.")
+    p_recover.add_argument("caminho", help="Arquivo cuja edição foi interrompida.")
+    p_recover.set_defaults(func=cmd_recover)
+
+    p_recover_credential = sub.add_parser("recover-credential", help="Recuperar credencial Windows após interrupção.")
+    p_recover_credential.add_argument("caminho", help="Caminho da credencial indicada pelo CLI.")
+    p_recover_credential.set_defaults(func=cmd_recover_credential)
+
+    p_recover_move = sub.add_parser("recover-move", help="Revisar e recuperar uma movimentação interrompida.")
+    p_recover_move.add_argument("journal", help="Diretório do journal da movimentação.")
+    p_recover_move.set_defaults(func=cmd_recover_move)
+
     p_config = sub.add_parser("config", help="Consultar ou configurar o modelo padrão.")
     p_config.add_argument("opcao", choices=["model"])
     p_config.add_argument("valor", nargs="?", help="Novo identificador do modelo.")
@@ -1146,10 +1337,13 @@ def montar_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argumentos = sys.argv[1:] if argv is None else argv
-    if not argumentos:
-        argumentos = ["agent"]
-    args = montar_parser().parse_args(argumentos)
     try:
+        if not argumentos and sys.stdin.isatty() and sys.stdout.isatty():
+            from passe1_engine.launcher import iniciar
+            return iniciar([])
+        if not argumentos:
+            argumentos = ["agent"]
+        args = montar_parser().parse_args(argumentos)
         return int(args.func(args))
     except ValueError as exc:
         print(str(exc))

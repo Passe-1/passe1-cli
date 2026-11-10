@@ -1,0 +1,142 @@
+"""Abre a TUI instalada em pseudoterminal e conversa com gateway simulado."""
+from __future__ import annotations
+
+import base64
+import importlib.util
+import os
+import queue
+import re
+import shlex
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("smoke_engine", Path(__file__).with_name("smoke-engine.py"))
+modulo = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(modulo)
+
+
+def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verificar_sandbox=False):
+    if os.name == "nt":
+        from winpty import PtyProcess
+        processo = PtyProcess.spawn([sys.executable, "-m", "passe1", *argumentos], cwd=pasta, env=ambiente, dimensions=(30, 100))
+        ler = processo.read
+        enviar = lambda texto: processo.write(texto)
+        fechar = lambda: processo.close(force=True)
+        tempos = ()
+        encerramentos = (EOFError, OSError)
+    else:
+        import pexpect
+        processo = pexpect.spawn(sys.executable, ["-m", "passe1", *argumentos], cwd=pasta, env=ambiente, encoding="utf-8", dimensions=(30, 100), timeout=90)
+        ler = lambda: processo.read_nonblocking(size=4096, timeout=1)
+        enviar = processo.send
+        fechar = lambda: processo.close(force=True)
+        tempos = (pexpect.TIMEOUT,)
+        encerramentos = (pexpect.EOF, EOFError, OSError)
+
+    mensagens = queue.Queue()
+    erros_leitura = []
+    def receber():
+        while True:
+            try:
+                mensagens.put(ler())
+            except tempos:
+                continue
+            except encerramentos as exc:
+                erros_leitura.append(repr(exc))
+                mensagens.put(None)
+                return
+    leitor = threading.Thread(target=receber, daemon=True)
+    leitor.start()
+    texto = ""
+    prazo = time.monotonic() + 120
+    enviado = False
+    shell_iniciado = False
+    negado = Path(pasta) / 'sandbox-negado.txt'
+    try:
+        while time.monotonic() < prazo:
+            try:
+                trecho = mensagens.get(timeout=1)
+            except queue.Empty:
+                continue
+            if trecho is None:
+                break
+            texto = (texto + trecho)[-200000:]
+            pronto = "commands" in texto.lower() or "comandos" in texto.lower()
+            if verificar_sandbox and pronto and not shell_iniciado and "sandbox" in texto.lower():
+                enviar("!")
+                time.sleep(0.2)
+                enviar(f"touch {shlex.quote(str(negado))}; printf 'SHELL_%s' DONE\r")
+                shell_iniciado = True
+                continue
+            shell_pronto = not verificar_sandbox or (shell_iniciado and "SHELL_DONE" in texto)
+            if not enviado and pronto and shell_pronto and (not aguardar_imagem or "[Image 1]" in texto):
+                if verificar_sandbox and negado.exists():
+                    raise RuntimeError("Sandbox permitiu escrita pelo shell direto da TUI.")
+                enviar("Responda ao teste.\r")
+                enviado = True
+            if enviado and "PASSE1_TUI_SUCESSO" in texto:
+                enviar("\x04")
+                fim = time.monotonic() + 15
+                while time.monotonic() < fim:
+                    try:
+                        if mensagens.get(timeout=1) is None:
+                            return
+                    except queue.Empty:
+                        continue
+                raise RuntimeError("TUI não encerrou após Ctrl+D.")
+        raise RuntimeError(
+            f"TUI não concluiu conversa: enviada={enviado}, leituras={erros_leitura!r}, "
+            f"exitstatus={getattr(processo, 'exitstatus', None)!r}, "
+            f"posts={len(modulo.Gateway.requisicoes)}, saída={texto[-4000:]!r}"
+        )
+    finally:
+        fechar()
+
+
+def main():
+    anterior = Path.cwd()
+    servidor = ThreadingHTTPServer(("127.0.0.1", 0), modulo.Gateway)
+    threading.Thread(target=servidor.serve_forever, daemon=True).start()
+    try:
+        with tempfile.TemporaryDirectory() as pasta:
+            try:
+                config = Path(pasta) / "config"
+                config.mkdir()
+                ambiente = os.environ.copy()
+                temporarios = Path(pasta) / "temporarios"
+                temporarios.mkdir()
+                ambiente["TMPDIR"] = str(temporarios)
+                if os.name == "nt":
+                    ambiente["TEMP"] = ambiente["TMP"] = str(temporarios)
+                ambiente.update({"PASSE1_CONFIG_DIR": str(config), "PASSE1_BASE_URL": f"http://127.0.0.1:{servidor.server_port}/v1"})
+                subprocess.run([sys.executable, "-I", "-X", "utf8", "-c", "import passe1; passe1._guardar_chave('sk-passe1-fixture')"], cwd=pasta, env=ambiente, check=True, timeout=30)
+                modulo.Gateway.autorizada = False
+                testar_terminal(pasta, ambiente)
+                if not modulo.Gateway.autorizada:
+                    raise RuntimeError("Gateway simulado não recebeu autenticação.")
+                imagem = Path(pasta) / "imagem.png"
+                imagem.write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"))
+                modulo.Gateway.requisicoes.clear()
+                testar_terminal(pasta, ambiente, ["agent", "--model", "glm-5.3-flash", "--session", "teste", "--image", str(imagem)], aguardar_imagem=True)
+                if not any("image_url" in str(item) or "data:image/png" in str(item) for item in modulo.Gateway.requisicoes):
+                    raise RuntimeError("TUI não enviou a imagem inicial ao gateway simulado.")
+                residuos = [item for item in temporarios.iterdir() if item.name.startswith("passe1-cli-images-") or re.fullmatch(r"passe1-[0-9a-f]{32}", item.name)]
+                if residuos:
+                    raise RuntimeError("Staging de imagem não foi removido ao encerrar a TUI.")
+                if sys.platform == "darwin":
+                    testar_terminal(pasta, ambiente, ["agent", "--sandbox"], verificar_sandbox=True)
+                print("TUI respondeu via gateway simulado em pseudoterminal.")
+            finally:
+                os.chdir(anterior)
+    finally:
+        servidor.shutdown()
+        servidor.server_close()
+
+
+if __name__ == "__main__":
+    main()

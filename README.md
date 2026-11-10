@@ -15,7 +15,9 @@ passe1 agent
 
 Para atualizar, execute novamente o instalador acima. A versão no PyPI pode estar desatualizada; prefira o instalador do site.
 
-Desenvolvedores: instale com `pip install -e .` ou execute `python passe1.py ...`.
+O comando `passe1` em terminal interativo abre a interface do OpenCode com a conta Passe1. O login e o saldo continuam disponíveis por `passe1 login` e `passe1 status`. O código do OpenCode é distribuído sob licença MIT, preservada em `passe1_engine/OPENCODE_LICENSE.txt`.
+
+Para construir a partir do código-fonte, inicialize o submódulo (`git submodule update --init --recursive`), instale Bun 1.3.14 e execute `python scripts/build-engine.py` seguido de `python -m build --wheel`. O wheel inclui o motor nativo para a plataforma em que foi construído. Ele não depende de um OpenCode instalado separadamente.
 
 ## Uso
 
@@ -121,6 +123,21 @@ O gateway que serve o instalador mantém atualmente uma cópia do CLI. Alteraç�
 - `setup codex` pede `export PASSE1_API_KEY=$(cat ~/.config/passe1/key)` no
   terminal.
 
-A opção `--session` salva mensagens, saídas de ferramentas e imagens localmente em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. Esse histórico pode conter dados sensíveis; remova o arquivo da sessão quando não precisar mais. Sessões são vinculadas ao projeto, gateway, modelo e chave usados na criação. A retomada de sessões está disponível em macOS e Linux.
+Em macOS e Linux, `agent --session` salva mensagens, saídas e imagens em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. No Windows, o comando usa sessões do motor OpenCode, guardadas no estado isolado de `~/.config/passe1/opencode/`; elas não são compatíveis com as sessões do agente legado. O histórico pode conter dados sensíveis. Sessões nomeadas são vinculadas ao projeto, gateway, modelo e chave usados na criação.
 
-As operações seguras de arquivo exigem recursos POSIX; atualmente o comando `agent` não está disponível no Windows. O `chat` continua disponível. A revalidação reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.
+`agent --sandbox` permanece disponível somente no macOS. A verificação de links reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.
+
+
+A CI aceita o marcador `[windows-only]` em commits de desenvolvimento para executar somente os dois runners Windows. Essa execução mantém o gate da matriz completa vermelho; o commit final deve ser enviado sem o marcador para executar os seis alvos. A release continua exigindo todos os builds.
+
+Quando um formatador automático estiver habilitado, o Passe1 preserva o conteúdo aprovado e informa que a formatação automática foi omitida se não for possível preservar a configuração do projeto com segurança. O formatador pode ser executado manualmente no terminal após aprovação. A busca informa quando atinge o limite de 10.000 arquivos candidatos.
+
+No macOS e Linux, ao usar imagens, o CLI mantém cópias temporárias privadas até o motor encerrar e tenta removê-las ao sair. Uma interrupção abrupta do supervisor, como `SIGKILL`, pode deixar resíduos no diretório temporário do sistema; nesse caso, remova manualmente as pastas `passe1-cli-images-*` que não pertençam a processos ainda ativos.
+
+No Windows, a edição segura recusa arquivos acima de 64 MiB e arquivos abertos para gravação por outro programa; salve e feche o editor antes de tentar novamente. A recuperação de uma edição interrompida usa `passe1 recover CAMINHO` e exige confirmação em terminal.
+
+As credenciais locais no Windows usam permissões restritas à conta atual. Se um arquivo antigo tiver permissões compartilhadas, o CLI preserva o arquivo e informa seu caminho; remova-o e faça login novamente para criar uma credencial protegida. Se uma atualização for interrompida, execute `passe1 recover-credential CAMINHO` em um terminal e confirme a recuperação indicada pelo CLI.
+
+Movimentações com `apply_patch` usam journal e guardam cópias em quarentena. Se uma operação for interrompida, use `passe1 recover-move CAMINHO_DO_JOURNAL` em um terminal para revisar o diff sanitizado e confirmar a recuperação. As cópias e o journal permanecem após a operação; a revisão integral recusa conteúdo acima de 1 MiB. No Windows, se a interrupção ocorrer antes do registro da identidade do arquivo temporário, o CLI preserva esse arquivo e informa seu caminho para inspeção e limpeza manual. O journal não garante proteção contra processos maliciosos do mesmo usuário, e um pseudoterminal não comprova presença humana.
+
+O build do motor adquire automaticamente a trava cooperativa do submódulo. Para aplicar ou reverter patches manualmente, execute toda a sequência sob `python scripts/vendor_lock.py -- <comando>`; não execute operações Git diretas em `vendor/opencode` em paralelo com o build.

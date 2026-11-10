@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "passe1"
-version = "0.2.7"
+version = "0.3.0"
 description = "CLI do Passe1: seu passe de IA no terminal."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,3 +15,9 @@ passe1 = "passe1:main"
 
 [tool.setuptools]
 py-modules = ["passe1", "agente", "sessao", "sandbox", "terminal", "processos", "arquivos_seguros"]
+
+[tool.setuptools.packages.find]
+include = ["passe1_engine"]
+
+[tool.setuptools.package-data]
+passe1_engine = ["bin/*", "OPENCODE_LICENSE.txt"]

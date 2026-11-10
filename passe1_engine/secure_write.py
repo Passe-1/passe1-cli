@@ -1,0 +1,111 @@
+"""Alterações POSIX por descritores com comparação do conteúdo aprovado."""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import arquivos_seguros
+
+
+def preparar_criacao(caminho):
+    alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.snapshot_pais(alvo)
+    raiz, partes = arquivos_seguros._partes(Path(alvo.anchor), alvo)
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fds = []
+    try:
+        fd = os.open(raiz.anchor, flags)
+        fds.append(fd)
+        st = os.fstat(fd)
+        pais = [[str(st.st_dev), str(st.st_ino)]]
+        for parte in partes[:-1]:
+            try:
+                fd = os.open(parte, flags, dir_fd=fd)
+            except FileNotFoundError:
+                break
+            fds.append(fd)
+            st = os.fstat(fd)
+            pais.append([str(st.st_dev), str(st.st_ino)])
+        return {'pais': pais}
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+def substituir(caminho, anterior, novo, identidade=None):
+    alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.substituir(alvo, anterior, novo, identidade=identidade)
+    raiz = Path(alvo.anchor)
+    if anterior is None:
+        pais = arquivos_seguros.criar(raiz, alvo, novo, pais_esperados=identidade.get('pais') if identidade else None)
+        return {'pais': [[str(valor) for valor in item] for item in pais]}
+    texto, versao = arquivos_seguros.ler(raiz, alvo)
+    if texto != anterior:
+        raise ValueError("O arquivo mudou após a aprovação.")
+    if identidade is not None and ([str(item) for item in versao.arquivo] != identidade.get('arquivo') or [[str(valor) for valor in item] for item in versao.pais] != identidade.get('pais')):
+        raise ValueError("A identidade do arquivo mudou após a aprovação.")
+    if not versao.arquivo[-1] & 0o222:
+        raise PermissionError("Arquivo sem permissão de escrita.")
+    arquivos_seguros.editar(raiz, alvo, versao, novo)
+
+
+
+def remover(caminho, anterior, identidade=None):
+    alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.remover(alvo, anterior, identidade=identidade)
+    raiz = Path(alvo.anchor)
+    texto, versao = arquivos_seguros.ler(raiz, alvo)
+    if texto != anterior:
+        raise ValueError("O arquivo mudou após a aprovação.")
+    if identidade is not None and ([str(item) for item in versao.arquivo] != identidade.get('arquivo') or [[str(valor) for valor in item] for item in versao.pais] != identidade.get('pais')):
+        raise ValueError("A identidade do arquivo mudou após a aprovação.")
+    with arquivos_seguros._pai(raiz, alvo) as (pai, nome, pais):
+        if pais != versao.pais:
+            raise ValueError("Diretório mudou após a aprovação.")
+        fd, info = arquivos_seguros._abrir_arquivo(pai, nome)
+        try:
+            if arquivos_seguros._estado(info) != versao.arquivo:
+                raise ValueError("O arquivo mudou após a aprovação.")
+            atual = os.stat(nome, dir_fd=pai, follow_symlinks=False)
+            if arquivos_seguros._estado(atual) != versao.arquivo:
+                raise ValueError("O arquivo mudou após a aprovação.")
+            os.unlink(nome, dir_fd=pai)
+        finally:
+            os.close(fd)
+
+def _main():
+    import json
+    import sys
+    try:
+        dados = json.load(sys.stdin)
+        if not isinstance(dados, dict) or not isinstance(dados.get('caminho'), str):
+            raise TypeError('Dados inválidos para alteração.')
+        if dados.get('operacao') == 'preparar':
+            json.dump(preparar_criacao(dados['caminho']), sys.stdout)
+            return 0
+        if not isinstance(dados.get('identidade'), dict):
+            raise TypeError('Identidade aprovada ausente.')
+        if dados.get('operacao') == 'remover':
+            if not isinstance(dados.get('anterior'), str):
+                raise TypeError('Conteúdo anterior inválido.')
+            remover(dados['caminho'], dados['anterior'], dados.get('identidade'))
+            return 0
+        if not isinstance(dados.get('novo'), str):
+            raise TypeError('Dados inválidos para alteração.')
+        if dados.get('anterior') is not None and not isinstance(dados['anterior'], str):
+            raise TypeError('Conteúdo anterior inválido.')
+        resultado = substituir(dados['caminho'], dados.get('anterior'), dados['novo'], dados.get('identidade'))
+        json.dump(resultado or {}, sys.stdout)
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        print(f'Alteração segura recusada: {exc}', file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == '__main__':
+    raise SystemExit(_main())

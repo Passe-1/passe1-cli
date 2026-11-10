@@ -32,7 +32,7 @@ def _disponivel():
         raise RuntimeError("Operações seguras de arquivo indisponíveis nesta plataforma.")
 
 
-def _partes(raiz, caminho):
+def _partes(raiz, caminho, permitir_quarentena=False):
     _disponivel()
     projeto = Path(os.path.abspath(raiz))
     alvo = Path(caminho)
@@ -44,12 +44,14 @@ def _partes(raiz, caminho):
     partes = alvo.parts
     if not partes or any(p in {"..", "."} for p in partes):
         raise ValueError("Caminho inválido ou fora do projeto.")
+    if not permitir_quarentena and any(p.lower().startswith((".passe1-move-", ".passe1-journal-")) for p in (*projeto.parts, *partes)):
+        raise ValueError("Quarentena e journal do Passe1 não podem ser acessados por ferramentas.")
     return projeto, partes
 
 
 @contextlib.contextmanager
-def _pai(raiz, caminho, criar=False):
-    projeto, partes = _partes(raiz, caminho)
+def _pai(raiz, caminho, criar=False, esperados=None, permitir_quarentena=False):
+    projeto, partes = _partes(raiz, caminho, permitir_quarentena=permitir_quarentena)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fds = []
     try:
@@ -60,21 +62,35 @@ def _pai(raiz, caminho, criar=False):
             fds.append(fd)
         raiz_stat = os.fstat(fd)
         pais = [(raiz_stat.st_dev, raiz_stat.st_ino)]
+        if esperados is not None and (not esperados or [str(v) for v in pais[0]] != esperados[0]):
+            raise ValueError("Diretório raiz mudou após a aprovação.")
         for parte in partes[:-1]:
-            try:
-                novo = os.open(parte, flags, dir_fd=fd)
-            except FileNotFoundError:
+            indice = len(pais)
+            if esperados is not None and indice >= len(esperados):
                 if not criar:
-                    raise
+                    raise ValueError("Diretório ausente na aprovação.")
                 try:
                     os.mkdir(parte, 0o755, dir_fd=fd)
                 except FileExistsError:
-                    pass
+                    raise ValueError("Diretório apareceu após a aprovação.") from None
                 novo = os.open(parte, flags, dir_fd=fd)
+            else:
+                try:
+                    novo = os.open(parte, flags, dir_fd=fd)
+                except FileNotFoundError:
+                    if not criar or esperados is not None:
+                        raise
+                    try:
+                        os.mkdir(parte, 0o755, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                    novo = os.open(parte, flags, dir_fd=fd)
             fds.append(novo)
             fd = novo
             st = os.fstat(fd)
             pais.append((st.st_dev, st.st_ino))
+            if esperados is not None and indice < len(esperados) and [str(st.st_dev), str(st.st_ino)] != esperados[indice]:
+                raise ValueError("Diretório mudou após a aprovação.")
         yield fd, partes[-1], tuple(pais)
     finally:
         for fd in reversed(fds):
@@ -101,12 +117,12 @@ def _abrir_arquivo(pai, nome):
         raise
 
 
-def ler(raiz, caminho, limite=None):
+def ler(raiz, caminho, limite=None, *, permitir_quarentena=False):
     """Lê texto UTF-8 e retorna conteúdo e versão para revalidar uma edição."""
     if limite is not None and (not isinstance(limite, int) or limite < 0):
         raise ValueError("Limite inválido.")
     raiz_resolvida = Path(os.path.abspath(raiz))
-    with _pai(raiz_resolvida, caminho) as (pai, nome, pais):
+    with _pai(raiz_resolvida, caminho, permitir_quarentena=permitir_quarentena) as (pai, nome, pais):
         fd, antes = _abrir_arquivo(pai, nome)
         try:
             with os.fdopen(os.dup(fd), "r", encoding="utf-8", newline="") as arquivo:
@@ -165,10 +181,10 @@ def _remover_temporario(pai, nome, identidade):
         os.unlink(nome, dir_fd=pai)
 
 
-def criar(raiz, caminho, conteudo):
+def criar(raiz, caminho, conteudo, pais_esperados=None):
     """Cria arquivo completo sem seguir links ou sobrescrever entrada existente."""
     raiz_resolvida = Path(os.path.abspath(raiz))
-    with _pai(raiz_resolvida, caminho, criar=True) as (pai, _nome, pais):
+    with _pai(raiz_resolvida, caminho, criar=True, esperados=pais_esperados) as (pai, _nome, pais):
         tmp = ".passe1-" + secrets.token_hex(16)
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666, dir_fd=pai)
         st = os.fstat(fd)
@@ -185,6 +201,7 @@ def criar(raiz, caminho, conteudo):
         finally:
             os.close(fd)
             _remover_temporario(pai, tmp, identidade)
+        return pais
 
 
 def editar(raiz, caminho, versao, novo):
