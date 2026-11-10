@@ -66,16 +66,21 @@ def main():
                 ident = criado["data"]["id"]
                 token = requisitar(f"/api/pty/{ident}/connect-token", {}, {"x-opencode-ticket": "1"})["data"]["ticket"]
                 with connect(f"ws://127.0.0.1:{numero}/api/pty/{ident}/connect?ticket={token}", additional_headers=headers, open_timeout=15) as canal:
-                    canal.send("iniciar\n")
+                    enter = "\r" if os.name == "nt" else "\n"
+                    canal.send("iniciar" + enter)
                     texto = ""
                     prazo = time.monotonic() + 30
                     while "PASSE1_PTY_RESPOSTA" not in texto:
                         restante = prazo - time.monotonic()
                         if restante <= 0:
                             raise RuntimeError("PTY não retornou a resposta esperada")
-                        quadro = canal.recv(timeout=restante)
+                        try:
+                            quadro = canal.recv(timeout=restante)
+                        except TimeoutError:
+                            estado = requisitar(f"/api/pty/{ident}")["data"]["status"]
+                            raise RuntimeError(f"PTY não respondeu: estado={estado}, saída={texto[-500:]!r}") from None
                         texto += quadro.decode("utf-8", "replace") if isinstance(quadro, bytes) else quadro
-                    canal.send("encerrar\n")
+                    canal.send("encerrar" + enter)
                 prazo = time.monotonic() + 15
                 while requisitar(f"/api/pty/{ident}")["data"]["status"] != "exited":
                     if time.monotonic() >= prazo:

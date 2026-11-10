@@ -31,14 +31,14 @@ def interromper(*args):
 win_move._renomear_handle = interromper
 win_move._mover_experimental(origem, destino, 'origem-preview', 'destino-preview', 'novo-preview', vo, vd, raiz)
 '''
-    resultado = subprocess.run([sys.executable, '-I', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
+    resultado = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
     assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
     journal = next(tmp_path.glob('move-*.journal'))
-    sem_terminal = subprocess.run([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=tmp_path, input='s\n', capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
+    sem_terminal = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-move', str(journal)], cwd=tmp_path, input='s\n', capture_output=True, text=True, encoding='utf-8', timeout=30, check=False)
     assert sem_terminal.returncode != 0
     assert not origem.exists() and destino.read_text(encoding='utf-8') == 'novo-preview'
 
-    negado = PtyProcess.spawn([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
+    negado = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
     saida_negada = queue.Queue()
 
     def ler_negacao():
@@ -70,7 +70,7 @@ win_move._mover_experimental(origem, destino, 'origem-preview', 'destino-preview
     assert respondeu and 'Recuperação cancelada' in texto_negado
     assert not origem.exists() and destino.read_text(encoding='utf-8') == 'novo-preview'
 
-    processo = PtyProcess.spawn([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
+    processo = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
     mensagens = queue.Queue()
 
     def ler():
@@ -129,13 +129,13 @@ def interromper(*args):
 win_move._renomear_handle = interromper
 win_move._mover_ausente_experimental(origem, destino, 'origem-preview', 'novo-preview', vo, vd, raiz)
 '''
-    resultado = subprocess.run([sys.executable, '-I', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
+    resultado = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
     assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
     journal = next(tmp_path.glob('move-*.journal'))
     assert not origem.exists() and destino.read_text(encoding='utf-8') == 'novo-preview'
     adicional = destino.with_name('adicional.txt')
     adicional.write_text('preservar', encoding='utf-8')
-    processo = PtyProcess.spawn([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
+    processo = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
     mensagens = queue.Queue()
 
     def ler():
@@ -191,12 +191,12 @@ def interromper(*args):
 win_move._gravar_handle = interromper
 win_move._mover_ausente_experimental(origem, destino, 'origem-preview', 'novo-preview', vo, vd, raiz)
 '''
-    resultado = subprocess.run([sys.executable, '-I', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
+    resultado = subprocess.run([sys.executable, '-I', '-X', 'utf8', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
     assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
     journal = next(tmp_path.glob('move-*.journal'))
     stage = next(destino.parent.glob('passe1-stage-*'))
     assert not Path(str(journal) + '.stage').exists()
-    processo = PtyProcess.spawn([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
+    processo = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
     mensagens = queue.Queue()
 
     def ler():
