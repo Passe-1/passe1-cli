@@ -2,16 +2,35 @@ name: Compilar motor por plataforma
 on:
   pull_request:
   push:
-    branches: ['**']
+    branches: ['main']
 permissions:
   contents: read
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      partial: ${{ steps.select.outputs.partial }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - id: select
+        run: |
+          if git log -1 --format=%B | grep -Fq '[windows-only]'; then
+            echo 'matrix=["windows-latest","windows-11-arm"]' >> "$GITHUB_OUTPUT"
+            echo 'partial=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix=["macos-15","macos-15-intel","ubuntu-latest","ubuntu-24.04-arm","windows-latest","windows-11-arm"]' >> "$GITHUB_OUTPUT"
+            echo 'partial=false' >> "$GITHUB_OUTPUT"
+          fi
   build:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(contains(github.event.head_commit.message, '[windows-only]') && '["windows-latest","windows-11-arm"]' || '["macos-15","macos-15-intel","ubuntu-latest","ubuntu-24.04-arm","windows-latest","windows-11-arm"]') }}
+        os: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
@@ -27,7 +46,7 @@ jobs:
       - if: runner.os == 'Windows'
         run: python -m pip install pytest
       - if: runner.os == 'Windows'
-        run: python -m pytest tests/test_win_secure.py tests/test_win_private.py tests/test_win_image_adapter.py tests/test_secure_stream.py -q
+        run: python -m pytest tests/test_win_secure.py tests/test_win_private.py tests/test_win_image_adapter.py tests/test_win_move.py tests/test_secure_stream.py -q
       - run: python scripts/build-engine.py
       - run: python -m pip install build pytest httpx
       - run: python -m build --wheel
@@ -57,16 +76,16 @@ jobs:
           path: dist/*.whl
 
   full-matrix-gate:
-    if: always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name != github.repository)
-    needs: build
+    if: always()
+    needs: [plan, build]
     runs-on: ubuntu-latest
     steps:
       - name: Exigir a matriz completa e verde
         env:
           BUILD_RESULT: ${{ needs.build.result }}
-          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
+          PARTIAL: ${{ needs.plan.outputs.partial }}
         run: |
-          if [[ "$COMMIT_MESSAGE" == *"[windows-only]"* ]]; then
+          if [[ "$PARTIAL" != "false" ]]; then
             echo "A execução parcial não autoriza merge ou release."
             exit 1
           fi
