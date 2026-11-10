@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 import queue
 import re
@@ -17,12 +18,14 @@ import httpx
 from prompt_toolkit.application import Application
 from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
+from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.layout import HSplit, Layout, Window
+from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
+from prompt_toolkit.layout.processors import AfterInput, ConditionalProcessor
 from prompt_toolkit.styles import Style
 from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.widgets import TextArea
@@ -88,7 +91,7 @@ def _servidor(binario, ambiente):
 
 
 class ComposerCompleter(Completer):
-    comandos = ('/ajuda', '/anexar', '/imagem', '/anexos', '/remover', '/limpar', '/sair')
+    comandos = ('/ajuda', '/anexar', '/imagem', '/anexos', '/remover', '/modelo', '/limpar', '/sair')
 
     def get_completions(self, document, complete_event):
         texto = document.text_before_cursor
@@ -104,9 +107,11 @@ class ComposerCompleter(Completer):
 
 
 class Interface:
-    def __init__(self, cliente, modelo, sessao, imagens):
+    def __init__(self, cliente, modelo, sessao, imagens, modelos=None):
         self.cliente = cliente
         self.modelo = modelo
+        self.modelos = modelos or (modelo,)
+        self.uso_etapas = {}
         self.sessao = sessao
         self.imagens = imagens
         self.anexos = []
@@ -129,6 +134,10 @@ class Interface:
         self._seguindo = True
         self.transcricao = TextArea(text='', read_only=True, scrollbar=False, wrap_lines=True, focusable=False, height=lambda: min(18, max(3, self.transcricao.text.count('\n') + 2)))
         self.entrada = TextArea(height=lambda: min(6, max(1, self.entrada.text.count('\n') + 1)), multiline=True, prompt='❯ ', wrap_lines=True, style='class:entrada', history=InMemoryHistory(), completer=ComposerCompleter(), complete_while_typing=False)
+        self.entrada.control.input_processors.append(ConditionalProcessor(
+            AfterInput('Descreva uma tarefa ou cole um arquivo', style='class:dica'),
+            filter=Condition(lambda: not self.entrada.text and self.app.output.get_size().columns >= 46),
+        ))
         teclas = KeyBindings()
 
         @teclas.add('enter')
@@ -227,15 +236,23 @@ class Interface:
             'subtitulo': 'fg:#5ee6e0' if cores else '',
             'rodape': 'fg:#5ee6e0' if cores else '',
             'entrada': 'bold',
-            'borda': 'fg:#ffd43b' if cores else '',
+            'borda': 'fg:#68728b' if cores else '',
+            'dica': 'fg:#a0a9bc' if cores else '',
             'atividade': 'fg:#ffd43b' if cores else 'bold',
         })
-        cabecalho = Window(FormattedTextControl(self._cabecalho), height=2, dont_extend_height=True)
+        cabecalho = Window(FormattedTextControl(self._cabecalho), height=3, dont_extend_height=True)
         rodape = Window(FormattedTextControl(self._rodape), height=lambda: len(self._linhas_rodape()), dont_extend_height=True)
         atividade = Window(FormattedTextControl(self._atividade), height=1, dont_extend_height=True)
-        layout = HSplit([cabecalho, Window(height=1), self.transcricao, atividade, Window(height=1, char='─', style='class:borda'), self.entrada, Window(height=1, char='─', style='class:borda'), rodape])
+        atalhos = ConditionalContainer(
+            Window(FormattedTextControl([
+                ('class:subtitulo', '  /ajuda'), ('', ' comandos   '),
+                ('class:subtitulo', '/anexar'), ('', ' arquivos   '),
+                ('class:subtitulo', '/modelo'), ('', ' trocar modelo'),
+            ]), height=1),
+            filter=Condition(lambda: not self.linhas and self.app.output.get_size().columns >= 55),
+        )
+        layout = HSplit([cabecalho, atalhos, self.transcricao, atividade, Window(height=1, char='─', style='class:borda'), self.entrada, Window(height=1, char='─', style='class:borda'), rodape])
         self.app = Application(layout=Layout(layout, focused_element=self.entrada), key_bindings=teclas, style=estilo, full_screen=False, refresh_interval=0.1, before_render=lambda app: self._atualizar_transcricao())
-        self._adicionar('O que vamos construir?\n/ajuda para comandos · /imagem para anexar uma imagem\n')
         if imagens:
             self._adicionar(f'{len(imagens)} imagem(ns) serão enviadas com sua próxima mensagem.\n')
 
@@ -267,14 +284,23 @@ class Interface:
     def _cabecalho(self):
         largura = self.app.output.get_size().columns
         caminho = str(Path.cwd())
-        disponivel = max(8, largura - len(self.modelo) - 24)
+        disponivel = max(1, largura - 3)
         if len(caminho) > disponivel:
-            caminho = '…' + caminho[-disponivel + 1:]
-        return FormattedText([('class:marca', ' P1 '), ('class:titulo', '  Passe1'), ('', f'  {self.modelo}\n'), ('class:subtitulo', f' {caminho}')])
+            caminho = '…' + caminho[-disponivel + 1:] if disponivel > 1 else '…'
+        from passe1 import VERSAO
+
+        return FormattedText([
+            ('class:marca', ' P1 '), ('class:titulo', '  Passe1'),
+            ('class:dica', f'  v{VERSAO}\n'),
+            ('class:subtitulo', '  Modelo '), ('', f'{self.modelo}\n'),
+            ('class:dica', f'  {_limpar(caminho).replace(chr(10), " ")}'),
+        ])
 
     def _linhas_rodape(self):
         largura = max(1, self.app.output.get_size().columns - 1)
         partes = [self.estado, 'Enter enviar', 'Ctrl+O linha', 'Esc parar', 'PgUp/PgDn histórico', 'Ctrl+D sair']
+        if self.uso_etapas:
+            partes.insert(1, f'{sum(self.uso_etapas.values()):,} tokens'.replace(',', '.'))
         linhas = []
         atual = ''
         for parte in partes:
@@ -352,7 +378,7 @@ class Interface:
             self.app.exit()
             return
         if texto == '/ajuda':
-            self._adicionar('\n/ajuda  comandos · /imagem CAMINHO  anexar imagem · /anexar CAMINHO  anexar arquivo · /anexos  revisar · /remover N  remover · /limpar  limpar tela · /sair  sair\nCtrl+O insere nova linha. Esc ou Ctrl+C interrompe a execução.\n')
+            self._adicionar('\n/ajuda  comandos · /imagem CAMINHO  anexar imagem · /anexar CAMINHO  anexar arquivo · /anexos  revisar · /remover N  remover · /modelo  listar ou trocar · /limpar  limpar tela · /sair  sair\nCtrl+O insere nova linha. Esc ou Ctrl+C interrompe a execução.\n')
             return
         if texto == '/limpar':
             self.linhas.clear()
@@ -397,6 +423,18 @@ class Interface:
                 self._adicionar('\nAnexo sensível descartado.\n')
             else:
                 self._adicionar(f'\nConfirme envio do arquivo {caminho}: /confirmar-anexo {token}, ou /cancelar-anexo.\n')
+            return
+        if texto == '/modelo':
+            modelos = '\n'.join(f"  {nome}{' (atual)' if nome == self.modelo else ''}" for nome in self.modelos)
+            self._adicionar(f'\nModelos disponíveis\n{modelos}\nUse /modelo NOME para trocar nesta sessão.\n')
+            return
+        if texto.startswith('/modelo '):
+            modelo = texto.split(maxsplit=1)[1].strip()
+            if modelo in self.modelos:
+                self.modelo = modelo
+                self._adicionar(f'\nModelo desta sessão: {modelo}.\n')
+            else:
+                self._adicionar('\nModelo indisponível. Consulte /modelo.\n')
             return
         if texto == '/anexos':
             itens = [parte.get('filename', 'imagem') for parte in self.imagens] + [anexo.nome for anexo in self.anexos]
@@ -591,7 +629,6 @@ class Interface:
                 async for linha in resposta.aiter_lines():
                     if not linha.startswith('data:'):
                         continue
-                    import json
                     try:
                         evento = json.loads(linha[5:].strip())
                     except ValueError:
@@ -621,6 +658,21 @@ class Interface:
                 return False
         return False
 
+    def _registrar_uso(self, parte):
+        if parte.get('type') != 'step-finish' or not isinstance(parte.get('id'), str):
+            return
+        tokens = parte.get('tokens')
+        if not isinstance(tokens, dict):
+            return
+        total = tokens.get('total')
+        if type(total) is not int:
+            valores = [tokens.get('input'), tokens.get('output')]
+            if any(type(n) is not int or n < 0 for n in valores):
+                return
+            total = sum(valores)
+        if total > 0:
+            self.uso_etapas[parte['id']] = total
+
     async def evento(self, evento):
         tipo = evento.get('type')
         props = evento.get('properties') or {}
@@ -635,6 +687,7 @@ class Interface:
             parte = props.get('part') or {}
             if parte.get('sessionID') != self.sessao or self.papeis.get(parte.get('messageID')) != 'assistant':
                 return
+            self._registrar_uso(parte)
             ident = parte.get('id')
             if not isinstance(ident, str):
                 return
@@ -685,14 +738,14 @@ class Interface:
         self.app.invalidate()
 
 
-async def _executar(url, segredo, modelo, sessao, imagens, tarefa):
+async def _executar(url, segredo, modelo, sessao, imagens, tarefa, modelos=None):
     cabecalhos = {'x-opencode-directory': quote(str(Path.cwd().resolve()), safe='')}
     async with httpx.AsyncClient(base_url=url, auth=('opencode', segredo), headers=cabecalhos, trust_env=False, timeout=30) as cliente:
         if not sessao:
             resposta = await cliente.post('/session', json={})
             resposta.raise_for_status()
             sessao = resposta.json()['id']
-        interface = Interface(cliente, modelo, sessao, imagens)
+        interface = Interface(cliente, modelo, sessao, imagens, modelos)
         if sessao:
             resposta = await cliente.get(f'/session/{sessao}/message')
             resposta.raise_for_status()
@@ -701,6 +754,10 @@ async def _executar(url, segredo, modelo, sessao, imagens, tarefa):
                 papel = info.get('role')
                 if papel not in {'user', 'assistant'}:
                     continue
+                if papel == 'assistant':
+                    for parte in mensagem.get('parts', []):
+                        if parte.get('type') == 'step-finish':
+                            interface._registrar_uso(parte)
                 textos = [parte.get('text', '') for parte in mensagem.get('parts', []) if parte.get('type') == 'text']
                 if textos:
                     interface._adicionar(('\nVocê  ›  ' if papel == 'user' else '\nPasse1  ›  ') + '\n'.join(textos) + '\n')
@@ -730,7 +787,9 @@ def iniciar(binario, ambiente, modelo, sessao=None, imagens=None, tarefa=''):
     processo = None
     try:
         processo, url, segredo = _servidor(binario, ambiente)
-        return asyncio.run(_executar(url, segredo, modelo, sessao, imagens or [], tarefa))
+        config = json.loads(ambiente.get('OPENCODE_CONFIG_CONTENT', '{}'))
+        modelos = tuple(config.get('provider', {}).get('passe1', {}).get('models', {}))
+        return asyncio.run(_executar(url, segredo, modelo, sessao, imagens or [], tarefa, modelos))
     except (httpx.HTTPError, OSError, ValueError, KeyError, EOFError, RuntimeError, queue.Empty, asyncio.TimeoutError):
         print('Não foi possível iniciar a interface do Passe1. Tente novamente.')
         return 1

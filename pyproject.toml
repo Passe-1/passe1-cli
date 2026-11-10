@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "passe1"
-version = "0.5.0"
+version = "0.5.1"
 description = "CLI do Passe1: seu passe de IA no terminal."
 readme = "README.md"
 requires-python = ">=3.10"
