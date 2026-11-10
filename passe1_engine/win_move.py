@@ -9,8 +9,19 @@ import hashlib
 import hmac
 import json
 import os
+import secrets
+from contextlib import contextmanager
+from pathlib import Path
 
-from passe1_engine.win_secure import LIMITE_EDICAO, _dpapi
+from passe1_engine.win_secure import (
+    LIMITE_EDICAO,
+    _ancorar_journal,
+    _dpapi,
+    _guardar_journal_ancorado,
+)
+from passe1_engine.win_secure import (
+    _abrir_journal as _abrir_journal_handle,
+)
 
 
 def _digest(texto):
@@ -87,3 +98,35 @@ def _abrir_journal(dados):
     except (UnicodeError, ValueError) as exc:
         raise ValueError('Journal de movimentação inválido.') from exc
     return _validar_journal(conteudo)
+
+
+@contextmanager
+def _journal_fixo(raiz, plano):
+    """Experimento: grava journal cifrado e mantém arquivo e ancestrais abertos.
+
+    Não autoriza alterações em arquivos: durabilidade após queda do sistema e
+    recuperação transacional ainda precisam ser comprovadas no Windows.
+    """
+    plano = _validar_journal(plano)
+    raiz = Path(os.path.abspath(raiz))
+    nome = 'move-' + secrets.token_hex(16) + '.journal'
+    arquivo = raiz / nome
+    with _ancorar_journal(raiz):
+        serializado = json.dumps(plano, ensure_ascii=False, separators=(',', ':'))
+        _, identidade = _guardar_journal_ancorado(arquivo, plano['origem'], serializado, plano['id_origem'])
+        fd, atual = _abrir_journal_handle(arquivo)
+        try:
+            if atual != identidade:
+                raise ValueError('Journal mudou durante a preparação.')
+            partes = []
+            while parte := os.read(fd, 65536):
+                partes.append(parte)
+            documento = json.loads(_dpapi(b''.join(partes), False).decode('utf-8'))
+            if documento.get('caminho') != os.path.abspath(plano['origem']) or documento.get('identidade') != plano['id_origem']:
+                raise ValueError('Identidade do journal mudou durante a preparação.')
+            validado = _validar_journal(json.loads(documento['conteudo']))
+            if validado != plano:
+                raise ValueError('Conteúdo do journal mudou durante a preparação.')
+            yield arquivo, identidade
+        finally:
+            os.close(fd)

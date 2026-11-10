@@ -73,3 +73,21 @@ def test_journal_dpapi_protege_e_autentica_conteudos(tmp_path):
     alterado[len(alterado) // 2] ^= 1
     with pytest.raises((OSError, ValueError)):
         win_move._abrir_journal(bytes(alterado))
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer DPAPI do Windows')
+def test_journal_fixo_persiste_cifrado_e_impede_renomeacao(tmp_path):
+    plano = {
+        'versao': 1, 'origem': str(tmp_path / 'a'), 'destino': str(tmp_path / 'b'),
+        'id_origem': ['1', '2', '3'], 'id_destino': ['1', '2', '4'],
+        'pais_origem': [['1', '0', '2']], 'pais_destino': [['1', '0', '2']],
+    }
+    for nome, texto in [('origem', 'segredo-origem'), ('destino', 'segredo-destino'), ('novo', 'novo')]:
+        plano['conteudo_' + nome] = texto
+        plano['hash_' + nome] = win_move._digest(texto)
+    with win_move._journal_fixo(tmp_path, plano) as (arquivo, identidade):
+        assert identidade
+        with pytest.raises(OSError):
+            os.rename(arquivo, arquivo.with_name('trocado'))
+    assert arquivo.exists()
+    assert b'segredo' not in arquivo.read_bytes()
