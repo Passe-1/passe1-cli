@@ -324,18 +324,6 @@ with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _, _, _):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
-def test_hipotese_cancelar_exclusao_automatica_do_temporario(tmp_path):
-    from passe1_engine import win_secure
-
-    destino = tmp_path / 'destino-novo.txt'
-    pais = win_secure.snapshot_pais(destino)['pais']
-    with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _pai, nome, _identidade):
-        win_move._gravar_handle(fd, b'conteudo')
-        win_move._reter_temporario(fd)
-    assert (tmp_path / nome).read_bytes() == b'conteudo'
-
-
-@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
     from passe1_engine import win_secure
 

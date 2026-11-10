@@ -398,21 +398,6 @@ def _preparar_arquivo_temporario(destino, pais_aprovados):
             kernel.CloseHandle(pai)
 
 
-def _reter_temporario(fd):
-    """Experimento para cancelar exclusão automática após journal durável."""
-    if os.name != 'nt':
-        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
-    import ctypes
-    import msvcrt
-    from ctypes import wintypes
-
-    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
-    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-    excluir = wintypes.BOOL(False)
-    if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
-        raise ctypes.WinError(ctypes.get_last_error())
-
-
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):
     """Experimento desconectado: guarda origem e altera destino com journal.
 
