@@ -43,7 +43,7 @@ jobs:
       - if: runner.os == 'Windows'
         run: python -m pip install pywinpty
       - if: runner.os == 'Windows'
-        run: python -m pytest tests/test_recuperacao_wheel.py -q
+        run: python -m pytest tests/test_recuperacao_wheel.py tests/test_win_image_wheel.py -q
       - run: python scripts/smoke-tui.py
       - uses: actions/upload-artifact@v4
         with:

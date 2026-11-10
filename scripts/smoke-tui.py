@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import os
 import queue
+import shlex
 import sys
 import tempfile
 import threading
@@ -17,7 +18,7 @@ modulo = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(modulo)
 
 
-def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False):
+def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verificar_sandbox=False):
     if os.name == "nt":
         from winpty import PtyProcess
         processo = PtyProcess.spawn([sys.executable, "-m", "passe1", *argumentos], cwd=pasta, env=ambiente, dimensions=(30, 100))
@@ -50,6 +51,8 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False):
     texto = ""
     prazo = time.monotonic() + 120
     enviado = False
+    shell_iniciado = False
+    negado = Path(pasta) / 'sandbox-negado.txt'
     try:
         while time.monotonic() < prazo:
             try:
@@ -59,7 +62,17 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False):
             if trecho is None:
                 break
             texto = (texto + trecho)[-200000:]
-            if not enviado and ("commands" in texto.lower() or "comandos" in texto.lower()) and (not aguardar_imagem or "[Image 1]" in texto):
+            pronto = "commands" in texto.lower() or "comandos" in texto.lower()
+            if verificar_sandbox and pronto and not shell_iniciado:
+                enviar("!")
+                time.sleep(0.2)
+                enviar(f"touch {shlex.quote(str(negado))}; printf 'SHELL_%s' DONE\r")
+                shell_iniciado = True
+                continue
+            shell_pronto = not verificar_sandbox or (shell_iniciado and "SHELL_DONE" in texto)
+            if not enviado and pronto and shell_pronto and (not aguardar_imagem or "[Image 1]" in texto):
+                if verificar_sandbox and negado.exists():
+                    raise RuntimeError("Sandbox permitiu escrita pelo shell direto da TUI.")
                 enviar("Responda ao teste.\r")
                 enviado = True
             if enviado and "PASSE1_TUI_SUCESSO" in texto:
@@ -97,7 +110,7 @@ def main():
                 if list(temporarios.glob("passe1-cli-images-*")):
                     raise RuntimeError("Staging de imagem não foi removido ao encerrar a TUI.")
                 if sys.platform == "darwin":
-                    testar_terminal(pasta, ambiente, ["agent", "--sandbox"])
+                    testar_terminal(pasta, ambiente, ["agent", "--sandbox"], verificar_sandbox=True)
                 print("TUI respondeu via gateway simulado em pseudoterminal.")
             finally:
                 os.chdir(anterior)

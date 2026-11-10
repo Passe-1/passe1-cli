@@ -157,6 +157,7 @@ def test_mapeamento_gravavel_na_janela_nao_engana_digest_do_consumidor(tmp_path,
     import hashlib
     import mmap
     import shutil
+    import warnings
 
     from passe1_engine.win_private import staging
 
@@ -224,3 +225,8 @@ def test_mapeamento_gravavel_na_janela_nao_engana_digest_do_consumidor(tmp_path,
         for pasta in tmp_path.glob('passe1-*'):
             shutil.rmtree(pasta)
     assert mapas
+    warnings.warn(
+        'mmap: conteúdo adulterado após yield' if entregue else 'mmap: abertura recusada antes do yield',
+        UserWarning,
+        stacklevel=1,
+    )

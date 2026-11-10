@@ -131,3 +131,5 @@ Em macOS e Linux, `agent --session` salva mensagens, saídas e imagens em `~/.co
 A CI aceita o marcador `[windows-only]` em commits de desenvolvimento para executar somente os dois runners Windows. Essa execução mantém o gate da matriz completa vermelho; o commit final deve ser enviado sem o marcador para executar os seis alvos. A release continua exigindo todos os builds.
 
 Quando um formatador automático estiver habilitado, o Passe1 preserva o conteúdo aprovado e informa que a formatação automática foi omitida se não for possível preservar a configuração do projeto com segurança. O formatador pode ser executado manualmente no terminal após aprovação. A busca informa quando atinge o limite de 10.000 arquivos candidatos.
+
+No macOS e Linux, ao usar imagens, o CLI mantém cópias temporárias privadas até o motor encerrar e tenta removê-las ao sair. Uma interrupção abrupta do supervisor, como `SIGKILL`, pode deixar resíduos no diretório temporário do sistema; nesse caso, remova manualmente as pastas `passe1-cli-images-*` que não pertençam a processos ainda ativos.
