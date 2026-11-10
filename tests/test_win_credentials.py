@@ -176,6 +176,20 @@ win_credentials.gravar(sys.argv[1], b'credencial-nova')
     assert not arquivo.with_name(arquivo.name + '.passe1-cred-journal').exists()
 
 
+def test_journal_malformado_e_recusado_sem_alterar_credencial(tmp_path):
+    import json
+
+    from passe1_engine import win_credentials, win_secure
+
+    arquivo = tmp_path / 'key'
+    win_credentials.gravar(arquivo, b'credencial-anterior')
+    journal = arquivo.with_name(arquivo.name + '.passe1-cred-journal')
+    journal.write_bytes(win_secure._dpapi(json.dumps({'caminho': [], 'conteudo': 'A', 'identidade': []}).encode(), True))
+    with pytest.raises(ValueError, match='não corresponde'):
+        win_credentials.recuperar(arquivo, confirmado=True)
+    assert arquivo.read_bytes() == b'credencial-anterior' and journal.exists()
+
+
 def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch):
     import passe1
     from passe1_engine import launcher, win_credentials

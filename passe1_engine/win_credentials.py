@@ -246,7 +246,8 @@ def recuperar(caminho, *, confirmado=False):
             if len(cifrado) > 2 * 1024 * 1024:
                 raise ValueError('Journal de credencial excede o limite.')
             guardado = json.loads(_dpapi(cifrado, False).decode('utf-8'))
-            if not isinstance(guardado, dict) or os.path.normcase(guardado.get('caminho', '')) != os.path.normcase(str(alvo)):
+            if (not isinstance(guardado, dict) or not isinstance(guardado.get('caminho'), str)
+                    or os.path.normcase(guardado['caminho']) != os.path.normcase(str(alvo))):
                 raise ValueError('Journal não corresponde à credencial.')
             conteudo = guardado.get('conteudo')
             if not isinstance(conteudo, str) or not conteudo or conteudo[0] not in ('A', 'B') or (conteudo[0] == 'A' and conteudo != 'A'):
