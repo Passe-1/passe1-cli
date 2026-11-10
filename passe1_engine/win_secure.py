@@ -321,7 +321,7 @@ def substituir(caminho, anterior, novo, *, identidade=None):
         return
     if identidade is None:
         raise ValueError("Identidade dos diretórios é obrigatória.")
-    _operar(caminho, None, novo, identidade_previa=identidade)
+    return _operar(caminho, None, novo, identidade_previa=identidade)
 
 
 def remover(caminho, anterior, *, identidade=None):
@@ -378,6 +378,8 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, iden
     if root == wintypes.HANDLE(-1).value:
         raise ctypes.WinError(ctypes.get_last_error())
     handles = [root]
+    criadas = set()
+    concluido = False
     def verificar(handle, diretorio):
         info = BY_HANDLE_FILE_INFORMATION()
         if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -387,7 +389,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, iden
         if not diretorio and info.nNumberOfLinks != 1:
             raise ValueError("Arquivo com múltiplos links não permitido.")
         return [str(info.dwVolumeSerialNumber), str(info.nFileIndexHigh), str(info.nFileIndexLow)]
-    def relativo(pai, nome, diretorio, remover_alvo=False):
+    def relativo(pai, nome, diretorio, remover_alvo=False, criar_dir=False, acesso_extra=0):
         buffer = ctypes.create_unicode_buffer(nome)
         tamanho = len(nome.encode("utf-16-le"))
         palavra = UNICODE_STRING(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
@@ -396,25 +398,56 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, iden
         ios = IO_STATUS_BLOCK()
         # Não compartilhar DELETE impede que ancestrais sejam renomeados durante a operação.
         opcoes = 0x00200000 | 0x20 | (1 if diretorio else 0x40)
-        acesso = 0x100081 if diretorio else ((0x80100080 if capturar else (0xC0110180 if conteudo is not None else 0x80110180)) if remover_alvo else 0x40110180)
+        acesso = (0x100081 | acesso_extra | (0x10004 if criar_dir else 0)) if diretorio else ((0x80100080 if capturar else (0xC0110180 if conteudo is not None else 0x80110180)) if remover_alvo else 0x40110180)
         status = ntdll.NtCreateFile(ctypes.byref(resultado), acesso,
                                    ctypes.byref(atributos), ctypes.byref(ios), None, 0,
                                    1 | 2 if diretorio else 0,
-                                   1 if diretorio or remover_alvo else 2, opcoes, None, 0)
+                                   2 if criar_dir else (1 if diretorio or remover_alvo else 2), opcoes, None, 0)
         if status < 0:
+            if status & 0xffffffff in (0xc0000034, 0xc000003a):
+                raise FileNotFoundError(f"Componente inexistente: {nome}")
             raise OSError(f"NtCreateFile falhou: 0x{status & 0xffffffff:08x}")
         handles.append(resultado.value)
+        if criar_dir:
+            criadas.add(resultado.value)
         verificar(resultado.value, diretorio)
         return resultado.value
     try:
         pais = [verificar(root, True)]
+        pais_handles = [root]
+        esperados = identidade_previa.get("pais") if isinstance(identidade_previa, dict) else None
+        criando = anterior is None and not capturar_pais
+        if criando and (not isinstance(esperados, list) or not esperados or pais[0] != esperados[0] or identidade_previa.get("arquivo") is not None):
+            raise ValueError("Identidade dos diretórios inválida ou mudou após o preview.")
         pai = root
-        for parte in partes[1:-1]:
-            pai = relativo(pai, parte, True)
+        for indice, parte in enumerate(partes[1:-1], 1):
+            if criando and len(pais) >= len(esperados):
+                # O componente estava ausente no preview: FILE_CREATE impede
+                # adotar um diretório inserido por outro processo.
+                if len(pais_handles) == 1:
+                    pai_criacao = kernel.CreateFileW(partes[0], 0x100085, 3, None, 3, 0x02200000, None)
+                    if pai_criacao == wintypes.HANDLE(-1).value:
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    handles.append(pai_criacao)
+                else:
+                    pai_criacao = relativo(pais_handles[-2], partes[indice - 1], True, acesso_extra=4)
+                    if verificar(pai_criacao, True) != pais[-1]:
+                        raise ValueError("Diretório mudou após o preview.")
+                pai = relativo(pai_criacao, parte, True, criar_dir=True)
+            else:
+                try:
+                    pai = relativo(pai, parte, True)
+                except FileNotFoundError:
+                    if capturar_pais:
+                        return {"pais": pais, "arquivo": None}
+                    raise ValueError("Diretório mudou após o preview.") from None
             pais.append(verificar(pai, True))
+            pais_handles.append(pai)
+            if criando and len(pais) <= len(esperados) and pais[-1] != esperados[len(pais) - 1]:
+                raise ValueError("Diretório mudou após o preview.")
         if capturar_pais:
             return {"pais": pais, "arquivo": None}
-        if anterior is None and identidade_previa != {"pais": pais, "arquivo": None}:
+        if criando and pais[:len(esperados)] != esperados:
             raise ValueError("Diretório mudou após o preview.")
         arquivo = relativo(pai, partes[-1], False, remover_alvo=anterior is not None)
         identidade_atual = {"pais": pais, "arquivo": verificar(arquivo, False)}
@@ -493,6 +526,15 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, iden
             if not kernel.SetFileInformationByHandle(arquivo, 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
                 raise OSError("Falha ao remover arquivo incompleto; verifique o destino.") from None
             raise
+        concluido = True
+        return {"pais": pais, "arquivo": None}
     finally:
+        falha_limpeza = False
         for handle in reversed(handles):
+            if handle in criadas and not concluido:
+                excluir = wintypes.BOOL(True)
+                if not kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+                    falha_limpeza = True
             kernel.CloseHandle(handle)
+        if falha_limpeza:
+            raise OSError("Falha ao remover diretórios criados; verifique o projeto.")

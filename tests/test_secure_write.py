@@ -110,3 +110,17 @@ def test_criacao_permite_criar_diretorios_que_permaneceram_ausentes(tmp_path):
     identidade = secure_write.preparar_criacao(alvo)
     secure_write.substituir(alvo, None, 'dados', identidade)
     assert alvo.read_text() == 'dados'
+
+
+def test_diretorio_criado_no_lote_nao_pode_ser_trocado(tmp_path):
+    primeiro = tmp_path / 'novo' / 'um'
+    segundo = tmp_path / 'novo' / 'dois'
+    identidade_original = secure_write.preparar_criacao(segundo)
+    criado = secure_write.substituir(primeiro, None, 'um', secure_write.preparar_criacao(primeiro))
+    identidade_estendida = {'pais': criado['pais']}
+    assert len(identidade_estendida['pais']) > len(identidade_original['pais'])
+    primeiro.parent.rename(tmp_path / 'original')
+    primeiro.parent.mkdir()
+    with pytest.raises(ValueError, match='Diretório mudou'):
+        secure_write.substituir(segundo, None, 'dois', identidade_estendida)
+    assert not segundo.exists()

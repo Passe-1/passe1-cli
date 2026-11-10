@@ -7,9 +7,11 @@ from pathlib import Path
 import arquivos_seguros
 
 
-
 def preparar_criacao(caminho):
     alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.snapshot_pais(alvo)
     raiz, partes = arquivos_seguros._partes(Path(alvo.anchor), alvo)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fds = []
@@ -33,10 +35,13 @@ def preparar_criacao(caminho):
 
 def substituir(caminho, anterior, novo, identidade=None):
     alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.substituir(alvo, anterior, novo, identidade=identidade)
     raiz = Path(alvo.anchor)
     if anterior is None:
-        arquivos_seguros.criar(raiz, alvo, novo, pais_esperados=identidade.get('pais') if identidade else None)
-        return
+        pais = arquivos_seguros.criar(raiz, alvo, novo, pais_esperados=identidade.get('pais') if identidade else None)
+        return {'pais': [[str(valor) for valor in item] for item in pais]}
     texto, versao = arquivos_seguros.ler(raiz, alvo)
     if texto != anterior:
         raise ValueError("O arquivo mudou após a aprovação.")
@@ -50,6 +55,9 @@ def substituir(caminho, anterior, novo, identidade=None):
 
 def remover(caminho, anterior, identidade=None):
     alvo = Path(os.path.abspath(caminho))
+    if os.name == "nt":
+        from passe1_engine import win_secure
+        return win_secure.remover(alvo, anterior, identidade=identidade)
     raiz = Path(alvo.anchor)
     texto, versao = arquivos_seguros.ler(raiz, alvo)
     if texto != anterior:
@@ -76,23 +84,24 @@ def _main():
     try:
         dados = json.load(sys.stdin)
         if not isinstance(dados, dict) or not isinstance(dados.get('caminho'), str):
-            raise ValueError('Dados inválidos para alteração.')
+            raise TypeError('Dados inválidos para alteração.')
         if dados.get('operacao') == 'preparar':
             json.dump(preparar_criacao(dados['caminho']), sys.stdout)
             return 0
         if not isinstance(dados.get('identidade'), dict):
-            raise ValueError('Identidade aprovada ausente.')
+            raise TypeError('Identidade aprovada ausente.')
         if dados.get('operacao') == 'remover':
             if not isinstance(dados.get('anterior'), str):
-                raise ValueError('Conteúdo anterior inválido.')
+                raise TypeError('Conteúdo anterior inválido.')
             remover(dados['caminho'], dados['anterior'], dados.get('identidade'))
             return 0
         if not isinstance(dados.get('novo'), str):
-            raise ValueError('Dados inválidos para alteração.')
+            raise TypeError('Dados inválidos para alteração.')
         if dados.get('anterior') is not None and not isinstance(dados['anterior'], str):
-            raise ValueError('Conteúdo anterior inválido.')
-        substituir(dados['caminho'], dados.get('anterior'), dados['novo'], dados.get('identidade'))
-    except (OSError, ValueError, RuntimeError) as exc:
+            raise TypeError('Conteúdo anterior inválido.')
+        resultado = substituir(dados['caminho'], dados.get('anterior'), dados['novo'], dados.get('identidade'))
+        json.dump(resultado or {}, sys.stdout)
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
         print(f'Alteração segura recusada: {exc}', file=sys.stderr)
         return 1
     return 0

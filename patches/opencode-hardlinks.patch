@@ -68,7 +68,7 @@ index 7f593550..ca5bcf1f 100644
  
      const fetch = Effect.fnUntraced(function* (url: string) {
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 3f89a639..4c4b6269 100644
+index 3f89a639..8ee56c02 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -7,6 +7,7 @@ import { InstanceState } from "@/effect/instance-state"
@@ -193,11 +193,38 @@ index 3f89a639..4c4b6269 100644
        yield* ctx.ask({
          permission: "edit",
          patterns: relativePaths,
-@@ -216,43 +235,39 @@ export const ApplyPatchTool = Tool.define(
+@@ -216,43 +235,70 @@ export const ApplyPatchTool = Tool.define(
  
        // Apply the changes
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
 +      let formattingSkipped = false
++      const criados = new Map<string, string[]>()
++      function diretorios(file: string) {
++        const result: string[] = []
++        let current = path.dirname(file)
++        while (true) {
++          result.unshift(current)
++          const parent = path.dirname(current)
++          if (parent === current) return result
++          current = parent
++        }
++      }
++      function identidadeAtual(file: string, identity: Identidade | undefined) {
++        if (!identity?.pais) return identity ?? null
++        const pais = [...identity.pais]
++        const dirs = diretorios(file)
++        while (pais.length < dirs.length) {
++          const item = criados.get(dirs[pais.length]!)
++          if (!item) break
++          pais.push(item)
++        }
++        return { ...identity, pais }
++      }
++      function registrarCriados(file: string, original: Identidade | undefined, atual: { pais?: string[][] }) {
++        if (!original?.pais || !atual.pais) return
++        const dirs = diretorios(file)
++        for (let i = original.pais.length; i < atual.pais.length && i < dirs.length; i++) criados.set(dirs[i]!, atual.pais[i]!)
++      }
  
        for (const change of fileChanges) {
 +        yield* verificar(afs, change.filePath)
@@ -212,7 +239,9 @@ index 3f89a639..4c4b6269 100644
 -            // Create parent directories (recursive: true is safe on existing/root dirs)
 -
 -            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
-+            yield* Effect.promise(() => gravarSeguro(change.filePath, change.targetPrevious ?? null, content, change.targetIdentity ?? null))
++            const identidade = identidadeAtual(change.filePath, change.targetIdentity)
++            const atual = yield* Effect.promise(() => gravarSeguro(change.filePath, change.targetPrevious ?? null, content, identidade))
++            if (change.targetPrevious === null) registrarCriados(change.filePath, change.targetIdentity, atual)
              updates.push({ file: change.filePath, event: "add" })
              break
 -
@@ -228,7 +257,9 @@ index 3f89a639..4c4b6269 100644
 -
 -              yield* afs.writeWithDirs(change.movePath!, Bom.join(change.newContent, change.bom))
 -              yield* afs.remove(change.filePath)
-+              yield* Effect.promise(() => gravarSeguro(change.movePath!, change.targetPrevious ?? null, content, change.targetIdentity ?? null))
++              const identidade = identidadeAtual(change.movePath, change.targetIdentity)
++              const atual = yield* Effect.promise(() => gravarSeguro(change.movePath!, change.targetPrevious ?? null, content, identidade))
++              if (change.targetPrevious === null) registrarCriados(change.movePath, change.targetIdentity, atual)
 +              yield* Effect.promise(() => removerSeguro(change.filePath, original, change.oldIdentity ?? null))
                updates.push({ file: change.filePath, event: "unlink" })
                updates.push({ file: change.movePath, event: "add" })
@@ -249,7 +280,7 @@ index 3f89a639..4c4b6269 100644
            yield* events.publish(FileSystem.Event.Edited, { file: edited })
          }
        }
-@@ -282,6 +297,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -282,6 +328,7 @@ export const ApplyPatchTool = Tool.define(
          return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
        })
        let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
@@ -406,10 +437,10 @@ index 6ea67124..56deaa7f 100644
            let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..77d8506a
+index 00000000..ff15b452
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,153 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
@@ -522,10 +553,13 @@ index 00000000..77d8506a
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Escrita segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "ignore", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const output = new Response(child.stdout).text()
 +  child.stdin.write(JSON.stringify({ caminho: file, anterior: previous, novo: next, identidade }))
 +  child.stdin.end()
-+  if (await child.exited !== 0) throw new Error("Escrita segura recusada ou arquivo mudou durante aprovação.")
++  const [json, status] = await Promise.all([output, child.exited])
++  if (status !== 0) throw new Error("Escrita segura recusada ou arquivo mudou durante aprovação.")
++  return JSON.parse(json) as { pais?: string[][] }
 +}
 +
 +export const formatarSeguro = (format: FormatInterface, file: string, content: string) =>
@@ -763,13 +797,22 @@ index 37be6d8c..75ebd1a6 100644
            const diagnostics = yield* lsp.diagnostics()
            const normalizedFilepath = FSUtil.normalizePath(filepath)
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 74203615..69a819d3 100644
+index 74203615..6e8f882d 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -87,6 +87,67 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
+@@ -87,6 +87,76 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
  const expectReadFailure = (filepath: string) => expectFailure(readText(filepath))
  
  describe("tool.apply_patch freeform", () => {
++  it.instance("cria dois arquivos no mesmo diretório originalmente ausente", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const { ctx } = makeCtx()
++    const patchText = "*** Begin Patch\n*** Add File: novo/um.txt\n+um\n*** Add File: novo/dois.txt\n+dois\n*** End Patch"
++    yield* execute({ patchText }, ctx)
++    expect(yield* readText(path.join(test.directory, "novo", "um.txt"))).toBe("um\n")
++    expect(yield* readText(path.join(test.directory, "novo", "dois.txt"))).toBe("dois\n")
++  }))
++
 +  it.instance("recusa troca de diretório do destino de move após aprovação", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const pasta = path.join(test.directory, "destino")

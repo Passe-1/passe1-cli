@@ -1043,6 +1043,33 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return 0 if sucesso else 1
 
 
+
+def cmd_recover(args: argparse.Namespace) -> int:
+    """Restaura explicitamente um journal Windows após confirmação no terminal."""
+    if sys.platform != "win32":
+        print("A recuperação de journal está disponível somente no Windows.")
+        return 1
+    if not sys.stdin.isatty():
+        print("A recuperação exige confirmação em um terminal interativo.")
+        return 1
+    caminho = Path(args.caminho).absolute()
+    print(f"Recuperar a versão anterior de {_terminal_seguro(str(caminho))}? A versão atual será substituída.")
+    try:
+        confirmacao = input("Confirmar recuperação? [s/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        confirmacao = ""
+    if confirmacao not in {"s", "sim"}:
+        print("Recuperação cancelada.")
+        return 1
+    try:
+        from passe1_engine.win_secure import recuperar
+        recuperar(caminho)
+    except (OSError, ValueError, RuntimeError):
+        print("Não foi possível recuperar o arquivo; verifique o journal e a identidade do arquivo.")
+        return 1
+    print("Arquivo recuperado.")
+    return 0
+
 def _backup(caminho: Path) -> Path:
     copia = caminho.with_suffix(caminho.suffix + ".bak")
     shutil.copy2(caminho, copia)
@@ -1122,6 +1149,10 @@ def montar_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--session", help="Nome para salvar e retomar o histórico local do agente.")
     p_agent.add_argument("--image", action="append", help="Imagem local (repita para anexar mais de uma).")
     p_agent.set_defaults(func=cmd_agent)
+
+    p_recover = sub.add_parser("recover", help="Recuperar uma edição Windows interrompida.")
+    p_recover.add_argument("caminho", help="Arquivo cuja edição foi interrompida.")
+    p_recover.set_defaults(func=cmd_recover)
 
     p_config = sub.add_parser("config", help="Consultar ou configurar o modelo padrão.")
     p_config.add_argument("opcao", choices=["model"])

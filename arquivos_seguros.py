@@ -199,6 +199,7 @@ def criar(raiz, caminho, conteudo, pais_esperados=None):
         finally:
             os.close(fd)
             _remover_temporario(pai, tmp, identidade)
+        return pais
 
 
 def editar(raiz, caminho, versao, novo):
