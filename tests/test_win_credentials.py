@@ -302,3 +302,14 @@ def test_credencial_legada_insegura_e_recusada_com_orientacao(tmp_path, monkeypa
         else:
             launcher._guardar_credencial('sk-passe1-nova')
     assert arquivo.read_bytes() == b'credencial-antiga'
+
+
+def test_diagnostico_acl_padrao_runner(tmp_path):
+    from passe1_engine import win_credentials
+    pasta = tmp_path / 'diagnostico'
+    pasta.mkdir()
+    acl = subprocess.run(['icacls', str(pasta)], capture_output=True, text=True, errors='replace', check=True, timeout=30).stdout
+    try:
+        win_credentials.gravar(pasta / 'key', b'fixture')
+    except ValueError as exc:
+        pytest.fail(f'ACL do diretório de teste: {acl}; erro: {exc}')
