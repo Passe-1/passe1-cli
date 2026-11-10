@@ -31,6 +31,10 @@ from passe1_engine.win_secure import (
 class RecoveryPendente(ValueError):
     """Credencial não deve ser lida nem alterada até a recuperação local."""
 
+class DiretorioInseguro(ValueError):
+    """Diretório permite que terceiros alterem o journal de recuperação."""
+
+
 
 @contextmanager
 def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
@@ -40,6 +44,8 @@ def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
     k = ctypes.WinDLL('kernel32', use_last_error=True)
     a = ctypes.WinDLL('advapi32', use_last_error=True)
     k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    k.CreateFileW.restype = wintypes.HANDLE
     k.CloseHandle.argtypes = [wintypes.HANDLE]
     k.LocalFree.argtypes = [ctypes.c_void_p]
     k.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
@@ -58,6 +64,8 @@ def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
     a.GetAclInformation.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, ctypes.c_int]
     a.GetAce.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p)]
     a.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    a.ConvertStringSidToSidW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p)]
+    a.IsValidSid.argtypes = [ctypes.c_void_p]
     n = ctypes.WinDLL('ntdll')
     n.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
     n.NtCreateFile.restype = ctypes.c_long
@@ -83,6 +91,58 @@ def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
         if not gravar and len(pais) != len(alvo.parts) - 1:
             raise FileNotFoundError('Diretório de credenciais inexistente.')
         with _criar_pais_fixo(alvo, pais) as (pai, _):
+            verificador = k.CreateFileW(str(alvo.parent), 0x20080, 7, None, 3, 0x02200000, None)
+            if verificador == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                ancorado, reaberto = _Info(), _Info()
+                if not k.GetFileInformationByHandle(pai, ctypes.byref(ancorado)) or not k.GetFileInformationByHandle(verificador, ctypes.byref(reaberto)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if (reaberto.attributes & 0x400 or not reaberto.attributes & 0x10
+                        or (ancorado.volume, ancorado.index_high, ancorado.index_low) != (reaberto.volume, reaberto.index_high, reaberto.index_low)):
+                    raise ValueError('Diretório de credenciais mudou durante a verificação.')
+                donos_confiaveis = []
+                try:
+                    for nome_sid in ('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'):
+                        sid_confiavel = ctypes.c_void_p()
+                        if not a.ConvertStringSidToSidW(nome_sid, ctypes.byref(sid_confiavel)):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        donos_confiaveis.append(sid_confiavel)
+                    dono_pai, acl_pai, sec_pai = ctypes.c_void_p(), ctypes.c_void_p(), ctypes.c_void_p()
+                    erro = a.GetSecurityInfo(verificador, 1, 5, ctypes.byref(dono_pai), None, ctypes.byref(acl_pai), None, ctypes.byref(sec_pai))
+                    if erro:
+                        raise OSError(erro, 'Não foi possível verificar o diretório de credenciais.')
+                    try:
+                        def confiavel(outro):
+                            return bool(outro and (a.EqualSid(sid, outro) or any(a.EqualSid(item, outro) for item in donos_confiaveis[:2])))
+                        if not confiavel(dono_pai) or not acl_pai:
+                            raise DiretorioInseguro('Diretório compartilhado inseguro para credenciais.')
+                        tamanho_acl = _AclSize()
+                        if not a.GetAclInformation(acl_pai, ctypes.byref(tamanho_acl), ctypes.sizeof(tamanho_acl), 2):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        for indice in range(tamanho_acl.AceCount):
+                            ace = ctypes.c_void_p()
+                            if not a.GetAce(acl_pai, indice, ctypes.byref(ace)):
+                                raise ctypes.WinError(ctypes.get_last_error())
+                            cabecalho = ctypes.string_at(ace, 4)
+                            if cabecalho[0] == 1:  # ACCESS_DENIED_ACE
+                                continue
+                            if cabecalho[0] != 0 or not a.IsValidSid(ace.value + 8):
+                                raise DiretorioInseguro('DACL do diretório não pode ser validada com segurança.')
+                            if confiavel(ace.value + 8) or (cabecalho[1] & 0x08 and a.EqualSid(donos_confiaveis[2], ace.value + 8)):
+                                continue
+                            mascara = ctypes.c_uint32.from_address(ace.value + 4).value
+                            perigo_pai = not cabecalho[1] & 0x08 and mascara & (0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000)
+                            perigo_arquivo = cabecalho[1] & 0x01 and mascara & (0x02 | 0x10000 | 0x40000 | 0x80000 | 0x40000000 | 0x10000000)
+                            if perigo_pai or perigo_arquivo:
+                                raise DiretorioInseguro('Diretório compartilhado inseguro para credenciais.')
+                    finally:
+                        k.LocalFree(sec_pai)
+                finally:
+                    for item in donos_confiaveis:
+                        k.LocalFree(item)
+            finally:
+                k.CloseHandle(verificador)
             buffer = ctypes.create_unicode_buffer(alvo.name)
             tamanho_nome = len(alvo.name.encode('utf-16-le'))
             palavra = _Unicode(tamanho_nome, tamanho_nome + 2, ctypes.cast(buffer, wintypes.LPWSTR))

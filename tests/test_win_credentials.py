@@ -7,12 +7,12 @@ import pytest
 pytestmark = pytest.mark.skipif(os.name != 'nt', reason='requer Windows')
 
 
-def test_credenciais_novas_sao_privadas_em_pasta_compartilhada(tmp_path):
+def test_credenciais_novas_sao_privadas_em_pasta_compartilhada_para_leitura(tmp_path):
     from passe1_engine import win_credentials
 
     compartilhada = tmp_path / 'compartilhada'
     compartilhada.mkdir()
-    subprocess.run(['icacls', str(compartilhada), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    subprocess.run(['icacls', str(compartilhada), '/grant', '*S-1-1-0:(OI)(CI)R'], capture_output=True, check=True, timeout=30)
     for nome in ('key', 'session', 'key-session', 'auth.json'):
         arquivo = compartilhada / nome
         win_credentials.gravar(arquivo, b'conteudo-ficticio')
@@ -24,12 +24,26 @@ def test_credenciais_novas_sao_privadas_em_pasta_compartilhada(tmp_path):
         assert win_credentials.ler(arquivo) == b'novo'
 
 
+def test_diretorio_compartilhado_com_escrita_e_recusado_sem_mutacao(tmp_path):
+    from passe1_engine import win_credentials
+
+    pasta = tmp_path / 'compartilhada'
+    pasta.mkdir()
+    subprocess.run(['icacls', str(pasta), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    arquivo = pasta / 'key'
+    with pytest.raises(ValueError, match='Diretório compartilhado inseguro'):
+        win_credentials.gravar(arquivo, b'credencial-ficticia')
+    with pytest.raises(ValueError, match='Diretório compartilhado inseguro'):
+        win_credentials.ler(arquivo)
+    assert not arquivo.exists() and not list(pasta.iterdir())
+
+
 def test_credencial_antiga_herdada_e_recusada_sem_ser_lida_ou_alterada(tmp_path):
     from passe1_engine import win_credentials
 
     compartilhada = tmp_path / 'compartilhada'
     compartilhada.mkdir()
-    subprocess.run(['icacls', str(compartilhada), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    subprocess.run(['icacls', str(compartilhada), '/grant', '*S-1-1-0:(OI)(CI)R'], capture_output=True, check=True, timeout=30)
     arquivo = compartilhada / 'key'
     arquivo.write_bytes(b'antiga')
     with pytest.raises(ValueError, match='sem proteção'):
@@ -191,11 +205,10 @@ def test_journal_malformado_e_recusado_sem_alterar_credencial(tmp_path):
 
 
 @pytest.mark.skipif(os.environ.get('PASSE1_TEST_MULTIUSER') != '1', reason='requer runner Windows descartável')
-def test_outro_usuario_nao_pode_apagar_journal_e_burlar_bloqueio():
+def test_outro_usuario_pode_apagar_sentinela_mas_diretorio_e_recusado():
     """Testa acesso real com conta local restrita e diretório compartilhado."""
     import ctypes
     import secrets
-    import sys
     import tempfile
     from ctypes import wintypes
     from pathlib import Path
@@ -218,21 +231,8 @@ def test_outro_usuario_nao_pode_apagar_journal_e_burlar_bloqueio():
             pasta = Path(pasta)
             subprocess.run(['icacls', str(pasta), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
             arquivo = pasta / 'key'
-            win_credentials.gravar(arquivo, b'anterior')
-            programa = '''
-import os, sys
-from passe1_engine import win_credentials
-gravar = win_credentials._gravar_handle
-def interromper(kernel, handle, dados):
-    gravar(kernel, handle, b'parcial')
-    os._exit(91)
-win_credentials._gravar_handle = interromper
-win_credentials.gravar(sys.argv[1], b'novo')
-'''
-            resultado = subprocess.run([sys.executable, '-c', programa, str(arquivo)], capture_output=True, timeout=60, check=False)
-            assert resultado.returncode == 91
             journal = arquivo.with_name(arquivo.name + '.passe1-cred-journal')
-            assert journal.exists()
+            journal.write_bytes(b'sentinela-sem-segredo')
             advapi = ctypes.WinDLL('advapi32', use_last_error=True)
             kernel = ctypes.WinDLL('kernel32', use_last_error=True)
             advapi.LogonUserW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
@@ -245,17 +245,16 @@ win_credentials.gravar(sys.argv[1], b'novo')
                 if not advapi.ImpersonateLoggedOnUser(token):
                     raise ctypes.WinError(ctypes.get_last_error())
                 try:
-                    try:
-                        os.unlink(journal)
-                    except PermissionError:
-                        pass
+                    os.unlink(journal)
                 finally:
                     if not advapi.RevertToSelf():
                         raise ctypes.WinError(ctypes.get_last_error())
             finally:
                 kernel.CloseHandle(token)
-            with pytest.raises(win_credentials.RecoveryPendente):
-                win_credentials.ler(arquivo)
+            assert not journal.exists()
+            with pytest.raises(ValueError, match='Diretório compartilhado inseguro'):
+                win_credentials.gravar(arquivo, b'credencial-ficticia')
+            assert not arquivo.exists() and not journal.exists()
     finally:
         if criado:
             subprocess.run(['net', 'user', nome, '/delete'], capture_output=True, timeout=30, check=False)
@@ -267,7 +266,7 @@ def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch)
 
     config = tmp_path / 'compartilhada'
     config.mkdir()
-    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)R'], capture_output=True, check=True, timeout=30)
     monkeypatch.setenv('PASSE1_CONFIG_DIR', str(config))
     passe1._guardar_sessao('https://passe1.exemplo', 'passe1_session', 'token-ficticio')
     passe1._guardar_chave('sk-passe1-ficticia')
@@ -288,7 +287,7 @@ def test_credencial_legada_insegura_e_recusada_com_orientacao(tmp_path, monkeypa
 
     config = tmp_path / 'compartilhada'
     config.mkdir()
-    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)R'], capture_output=True, check=True, timeout=30)
     monkeypatch.setenv('PASSE1_CONFIG_DIR', str(config))
     if nome == 'key-session':
         passe1._guardar_sessao('https://passe1.exemplo', 'passe1_session', 'token-ficticio')

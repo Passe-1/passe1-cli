@@ -63,6 +63,8 @@ def _ler_config_privado(caminho: Path) -> str:
             return win_credentials.ler(caminho).decode("utf-8")
         except win_credentials.RecoveryPendente as exc:
             raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
+        except win_credentials.DiretorioInseguro as exc:
+            raise ValueError(f"Diretório de credenciais inseguro: {caminho.parent}. Use um diretório privado ou ajuste suas permissões.") from exc
         except ValueError as exc:
             raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
     return caminho.read_text(encoding="utf-8")
@@ -75,6 +77,8 @@ def _gravar_config_privado(caminho: Path, texto: str) -> None:
             win_credentials.gravar(caminho, texto.encode("utf-8"))
         except win_credentials.RecoveryPendente as exc:
             raise ValueError(f"Recuperação pendente. Execute passe1 recover-credential \"{caminho}\".") from exc
+        except win_credentials.DiretorioInseguro as exc:
+            raise ValueError(f"Diretório de credenciais inseguro: {caminho.parent}. Use um diretório privado ou ajuste suas permissões.") from exc
         except ValueError as exc:
             raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
         return
