@@ -1,6 +1,7 @@
 """Movimentação POSIX recuperável com quarentena e renames exclusivos.
 
 A quarentena é mantida porque POSIX não oferece unlink condicional por inode.
+A validação após rename não é atômica contra outro processo do mesmo usuário.
 """
 from __future__ import annotations
 
@@ -345,12 +346,12 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
                         _exclusivo(df, dn, qdf, 'novo')
                         _confirmar_movido(qdf, 'novo', dados['id_novo'], dados['hash_novo'], journal)
                     _exclusivo(qdf, 'destino', df, dn)
-                    _confirmar_movido(df, dn, dados['id_destino'], dados['hash_destino'], journal)
+                    _confirmar_movido(df, dn, dados['id_destino'], dados['hash_destino'], journal, quarentena=qdf)
                     os.fsync(qdf)
                     os.fsync(df)
                 if hold_o is not None:
                     _exclusivo(qof, 'origem', of, on)
-                    _confirmar_movido(of, on, dados['id_origem'], dados['hash_origem'], journal)
+                    _confirmar_movido(of, on, dados['id_origem'], dados['hash_origem'], journal, quarentena=qof)
                     os.fsync(qof)
                     os.fsync(of)
             finally:
@@ -361,14 +362,29 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
 
 
 
-def _confirmar_movido(pai, nome, identidade_esperada, hash_esperado, journal):
+def _confirmar_movido(pai, nome, identidade_esperada, hash_esperado, journal, *, quarentena=None):
     try:
         texto, identidade = _ler_guardado(pai, nome)
         if identidade != identidade_esperada or hashlib.sha256(texto.encode()).hexdigest() != hash_esperado:
             raise ValueError('Identidade ou conteúdo divergente.')
     except (OSError, ValueError, UnicodeError) as exc:
-        nome = terminal.seguro(journal).replace('\n', r'\n')
-        raise RuntimeError(f'Estado incerto após movimentação; não tente restauração automática. Journal preservado em {nome}.') from exc
+        detalhe = 'Não foi possível isolar a entrada inesperada.'
+        if quarentena is not None:
+            try:
+                antes = os.stat(nome, dir_fd=pai, follow_symlinks=False)
+                incidente = 'incidente-' + secrets.token_hex(16)
+                _exclusivo(pai, nome, quarentena, incidente)
+                depois = os.stat(incidente, dir_fd=quarentena, follow_symlinks=False)
+                os.fsync(pai)
+                os.fsync(quarentena)
+                if (antes.st_dev, antes.st_ino, antes.st_mode) == (depois.st_dev, depois.st_ino, depois.st_mode):
+                    detalhe = 'Entrada inesperada movida para quarentena; confira o journal.'
+                else:
+                    detalhe = 'Uma entrada diferente foi movida; confira o journal e a quarentena.'
+            except (OSError, ValueError, RuntimeError):
+                pass
+        caminho = terminal.seguro(journal).replace('\n', r'\n')
+        raise RuntimeError(f'Estado incerto após movimentação. {detalhe} Journal preservado em {caminho}.') from exc
 
 
 def _previa_local(origem, destino, backup_origem, backup_destino, destino_atual):

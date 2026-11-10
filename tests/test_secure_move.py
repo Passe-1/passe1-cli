@@ -527,7 +527,9 @@ def test_recuperacao_detecta_backup_trocado_no_rename(tmp_path, monkeypatch):
     monkeypatch.setattr(secure_move, '_exclusivo', trocar)
     with pytest.raises(RuntimeError, match='Estado incerto'):
         secure_move.recuperar(journal, plano['revisao'], confirmado=True)
-    assert destino.read_text() == 'terceiro'
+    assert not destino.exists()
+    (incidente,) = backup.parent.glob('incidente-*')
+    assert incidente.read_text() == 'terceiro'
     assert backup.with_name('destino-real').read_text() == 'destino aprovado\n'
     assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
 
@@ -549,7 +551,9 @@ def test_recuperacao_detecta_origem_trocada_no_rename(tmp_path, monkeypatch):
     monkeypatch.setattr(secure_move, '_exclusivo', trocar)
     with pytest.raises(RuntimeError, match='Estado incerto'):
         secure_move.recuperar(journal, plano['revisao'], confirmado=True)
-    assert origem.read_text() == 'terceiro'
+    assert not origem.exists()
+    (incidente,) = backup.parent.glob('incidente-*')
+    assert incidente.read_text() == 'terceiro'
     assert backup.with_name('origem-real').read_text() == 'origem aprovada\n'
     assert destino.read_text() == 'destino aprovado\n'
 
@@ -597,3 +601,83 @@ def test_protocolo_json_nao_expoe_previa_nem_autorizacao(tmp_path):
     assert 'previa' not in resultado and 'revisao' not in resultado
     assert 'origem aprovada' not in processo.stdout
     assert 'destino aprovado' not in processo.stdout
+
+
+def test_isolamento_falha_fechado_sem_sobrescrever_terceiro(tmp_path, monkeypatch):
+    origem, destino, _, *_ = (dados := preparar(tmp_path))
+    journal = executar(dados)
+    plano = secure_move.revisar_local(journal)
+    manifesto = json.loads((journal / 'manifesto.json').read_text())
+    backup = destino.parent / manifesto['hold_destino'] / 'destino'
+    original = secure_move._exclusivo
+    chamadas = []
+    def trocar_e_bloquear(*args):
+        chamadas.append(True)
+        if len(chamadas) == 2:
+            backup.rename(backup.with_name('destino-real'))
+            backup.write_text('terceiro')
+        if len(chamadas) == 3:
+            raise FileExistsError('quarentena ocupada')
+        return original(*args)
+    monkeypatch.setattr(secure_move, '_exclusivo', trocar_e_bloquear)
+    with pytest.raises(RuntimeError, match='Não foi possível isolar'):
+        secure_move.recuperar(journal, plano['revisao'], confirmado=True)
+    assert destino.read_text() == 'terceiro'
+    assert backup.with_name('destino-real').read_text() == 'destino aprovado\n'
+    assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
+    assert journal.exists()
+
+
+def test_troca_durante_isolamento_preserva_as_duas_entradas(tmp_path, monkeypatch):
+    origem, destino, _, *_ = (dados := preparar(tmp_path))
+    journal = executar(dados)
+    plano = secure_move.revisar_local(journal)
+    manifesto = json.loads((journal / 'manifesto.json').read_text())
+    backup = destino.parent / manifesto['hold_destino'] / 'destino'
+    original = secure_move._exclusivo
+    chamadas = []
+    def trocar_duas_vezes(*args):
+        chamadas.append(True)
+        if len(chamadas) == 2:
+            backup.rename(backup.with_name('destino-real'))
+            backup.write_text('primeiro terceiro')
+        if len(chamadas) == 3:
+            destino.rename(tmp_path / 'primeiro-terceiro')
+            destino.write_text('segundo terceiro')
+        return original(*args)
+    monkeypatch.setattr(secure_move, '_exclusivo', trocar_duas_vezes)
+    with pytest.raises(RuntimeError, match='entrada diferente'):
+        secure_move.recuperar(journal, plano['revisao'], confirmado=True)
+    assert not destino.exists()
+    assert (tmp_path / 'primeiro-terceiro').read_text() == 'primeiro terceiro'
+    (incidente,) = backup.parent.glob('incidente-*')
+    assert incidente.read_text() == 'segundo terceiro'
+    assert backup.with_name('destino-real').read_text() == 'destino aprovado\n'
+    assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
+
+
+def test_symlink_instalado_por_troca_volta_a_quarentena_sem_seguir(tmp_path, monkeypatch):
+    origem, destino, _, *_ = (dados := preparar(tmp_path))
+    journal = executar(dados)
+    plano = secure_move.revisar_local(journal)
+    manifesto = json.loads((journal / 'manifesto.json').read_text())
+    backup = destino.parent / manifesto['hold_destino'] / 'destino'
+    externo = tmp_path / 'externo'
+    externo.write_text('não tocar')
+    original = secure_move._exclusivo
+    chamadas = []
+    def trocar(*args):
+        chamadas.append(True)
+        if len(chamadas) == 2:
+            backup.rename(backup.with_name('destino-real'))
+            backup.symlink_to(externo)
+        return original(*args)
+    monkeypatch.setattr(secure_move, '_exclusivo', trocar)
+    with pytest.raises(RuntimeError, match='Entrada inesperada movida para quarentena'):
+        secure_move.recuperar(journal, plano['revisao'], confirmado=True)
+    assert not destino.exists()
+    (incidente,) = backup.parent.glob('incidente-*')
+    assert incidente.is_symlink()
+    assert externo.read_text() == 'não tocar'
+    assert backup.with_name('destino-real').read_text() == 'destino aprovado\n'
+    assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
