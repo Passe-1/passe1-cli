@@ -438,6 +438,40 @@ win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, v
     assert destino.read_text(encoding='utf-8') == 'destino'
 
 
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_recuperacao_interrompida_pode_ser_revisada_novamente(tmp_path):
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    journal = win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, tmp_path)
+    programa = '''
+import os, sys
+from passe1_engine import win_move
+journal = sys.argv[1]
+revisao = win_move._revisar_experimental(journal)
+def interromper(fd, dados):
+    os.write(fd, dados[:1])
+    os.fsync(fd)
+    os._exit(91)
+win_move._gravar_handle = interromper
+win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(journal)], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    assert destino.read_text(encoding='utf-8') == 'dovo'
+    assert not origem.exists()
+    nova_revisao = win_move._revisar_experimental(journal)
+    win_move._recuperar_experimental(journal, nova_revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert destino.read_text(encoding='utf-8') == 'destino'
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='requer NTFS e handles do Windows')
 def test_movimentacao_e_recuperacao_preservam_acl_e_streams(tmp_path):
     import ctypes
