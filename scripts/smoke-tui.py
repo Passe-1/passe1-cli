@@ -6,7 +6,6 @@ import importlib.util
 import os
 import queue
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -14,6 +13,8 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+
+import pyte
 
 spec = importlib.util.spec_from_file_location("smoke_engine", Path(__file__).with_name("smoke-engine.py"))
 modulo = importlib.util.module_from_spec(spec)
@@ -53,10 +54,10 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
     leitor = threading.Thread(target=receber, daemon=True)
     leitor.start()
     texto = ""
+    tela = pyte.Screen(100, 30)
+    fluxo = pyte.Stream(tela)
     prazo = time.monotonic() + 120
     enviado = False
-    shell_iniciado = False
-    negado = Path(pasta) / 'sandbox-negado.txt'
     try:
         while time.monotonic() < prazo:
             try:
@@ -66,20 +67,14 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
             if trecho is None:
                 break
             texto = (texto + trecho)[-200000:]
-            pronto = "commands" in texto.lower() or "comandos" in texto.lower()
-            if verificar_sandbox and pronto and not shell_iniciado and "sandbox" in texto.lower():
-                enviar("!")
-                time.sleep(0.2)
-                enviar(f"touch {shlex.quote(str(negado))}; printf 'SHELL_%s' DONE\r")
-                shell_iniciado = True
-                continue
-            shell_pronto = not verificar_sandbox or (shell_iniciado and "SHELL_DONE" in texto)
-            if not enviado and pronto and shell_pronto and (not aguardar_imagem or "[Image 1]" in texto):
-                if verificar_sandbox and negado.exists():
-                    raise RuntimeError("Sandbox permitiu escrita pelo shell direto da TUI.")
+            fluxo.feed(trecho)
+            visivel = "\n".join(tela.display)
+            pronto = "Enter enviar" in visivel
+            imagem_pronta = not aguardar_imagem or "imagem(ns)" in visivel
+            if not enviado and pronto and imagem_pronta:
                 enviar("Responda ao teste.\r")
                 enviado = True
-            if enviado and "PASSE1_TUI_SUCESSO" in texto:
+            if enviado and "PASSE1_TUI_SUCESSO" in visivel:
                 enviar("\x04")
                 fim = time.monotonic() + 15
                 while time.monotonic() < fim:

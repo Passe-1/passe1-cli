@@ -41,10 +41,10 @@ def test_motor_instalado_recusa_imagem_alterada_antes_do_post(tmp_path):
     programa = '''
 import json
 import passe1
-from passe1_engine import launcher
+from passe1_engine import launcher, tui
 passe1._guardar_chave('sk-passe1-fixture')
 capturado = {}
-launcher._executar_motor = lambda args, env: capturado.update(binario=args[0], env=env)
+tui.iniciar = lambda binario, env, modelo: capturado.update(binario=str(binario), env=env)
 launcher.iniciar([])
 print(json.dumps(capturado))
 '''
