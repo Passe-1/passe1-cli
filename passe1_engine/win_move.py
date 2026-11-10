@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -115,7 +116,8 @@ def _restaurar_conteudo(fd, anterior, novo, *, confirmado=False):
         if tamanho > LIMITE_EDICAO:
             raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
         partes.append(parte)
-    if not _escrita_interrompida(anterior, novo, b''.join(partes)):
+    atual = b''.join(partes)
+    if not (_escrita_interrompida(anterior, novo, atual) or _escrita_interrompida(novo, anterior, atual)):
         raise ValueError('Conteúdo divergiu; recuperação recusada.')
     _gravar_handle(fd, anterior)
 
@@ -195,7 +197,7 @@ def _journal_fixo(raiz, plano):
 
 
 @contextmanager
-def _par_fixo(origem, destino, plano):
+def _par_fixo(origem, destino, plano, *, em_quarentena=False, permitir_parcial=False):
     """Experimento: mantém ambos arquivos aprovados abertos sem compartilhamento."""
     if os.name != 'nt':
         raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
@@ -209,6 +211,11 @@ def _par_fixo(origem, destino, plano):
     caminhos = (Path(os.path.abspath(origem)), Path(os.path.abspath(destino)))
     if tuple(map(str, caminhos)) != (plano['origem'], plano['destino']):
         raise ValueError('Caminhos não correspondem ao journal aprovado.')
+    if em_quarentena:
+        quarentena = plano.get('quarentena')
+        if not isinstance(quarentena, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', quarentena):
+            raise ValueError('Nome de quarentena inválido no journal.')
+        caminhos = (caminhos[0].with_name(quarentena), caminhos[1])
     kernel = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
@@ -262,7 +269,13 @@ def _par_fixo(origem, destino, plano):
                     if tamanho > LIMITE_EDICAO:
                         raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
                     partes.append(parte)
-                if not hmac.compare_digest(hashlib.sha256(b''.join(partes)).hexdigest(), plano['hash_' + nome]):
+                atual = b''.join(partes)
+                igual = hmac.compare_digest(hashlib.sha256(atual).hexdigest(), plano['hash_' + nome])
+                if not igual and nome == 'destino' and permitir_parcial:
+                    antigo = plano['conteudo_destino'].encode('utf-8')
+                    novo = plano['conteudo_novo'].encode('utf-8')
+                    igual = _escrita_interrompida(antigo, novo, atual) or _escrita_interrompida(novo, antigo, atual)
+                if not igual:
                     raise ValueError('Conteúdo mudou após a aprovação.')
                 os.lseek(fd, 0, os.SEEK_SET)
                 descritores[nome] = fd
@@ -279,7 +292,7 @@ def _renomear_handle(fd, diretorio, nome):
     """Experimento: renomeia por handle, sem substituir entrada existente."""
     if os.name != 'nt':
         raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
-    if not isinstance(nome, str) or nome in ('', '.', '..') or any(c in nome for c in '\\/ :') or nome.endswith('.'):
+    if not isinstance(nome, str) or nome in ('', '.', '..') or any(c in nome for c in '\\/:<>|?*') or nome.endswith((' ', '.')):
         raise ValueError('Nome de quarentena inválido.')
     import ctypes
     import msvcrt
@@ -300,3 +313,104 @@ def _renomear_handle(fd, diretorio, nome):
     status = ntdll.NtSetInformationFile(msvcrt.get_osfhandle(fd), ctypes.byref(io), ctypes.byref(dados), ctypes.sizeof(dados), 10)
     if status < 0:
         raise OSError(f'NtSetInformationFile falhou: 0x{status & 0xffffffff:08x}')
+
+
+def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):
+    """Experimento desconectado: guarda origem e altera destino com journal.
+
+    Não deve ser exposto ao usuário até a recuperação transacional, validação
+    de interrupções e revisão do Windows estarem implementadas.
+    """
+    if not isinstance(identidade_origem, dict) or not isinstance(identidade_destino, dict):
+        raise TypeError('Identidades aprovadas inválidas.')
+    plano = {
+        'versao': 1,
+        'origem': os.path.abspath(origem), 'destino': os.path.abspath(destino),
+        'id_origem': identidade_origem.get('arquivo'), 'id_destino': identidade_destino.get('arquivo'),
+        'pais_origem': identidade_origem.get('pais'), 'pais_destino': identidade_destino.get('pais'),
+        'quarentena': 'passe1-move-' + secrets.token_hex(16),
+    }
+    for nome, conteudo in (('origem', anterior_origem), ('destino', anterior_destino), ('novo', novo)):
+        plano['conteudo_' + nome] = conteudo
+        plano['hash_' + nome] = _digest(conteudo)
+    _validar_journal(plano)
+    journal = None
+    try:
+        with _par_fixo(origem, destino, plano) as (arquivos, diretorios), _journal_fixo(journal_root, plano) as (journal, _):
+            _gravar_handle(arquivos['destino'], novo.encode('utf-8'))
+            _renomear_handle(arquivos['origem'], diretorios['origem'], plano['quarentena'])
+        return journal
+    except BaseException as exc:
+        if journal is not None:
+            raise RuntimeError(f'Movimentação interrompida; journal preservado: {str(journal)!r}') from exc
+        raise
+
+
+@contextmanager
+def _abrir_plano_fixo(journal):
+    """Abre o journal experimental cifrado, fixando sua identidade durante uso."""
+    arquivo = Path(os.path.abspath(journal))
+    with _ancorar_journal(arquivo.parent):
+        fd, identidade = _abrir_journal_handle(arquivo)
+        try:
+            partes, tamanho = [], 0
+            while parte := os.read(fd, 65536):
+                tamanho += len(parte)
+                if tamanho > LIMITE_EDICAO * 4:
+                    raise ValueError('Journal excede o limite de recuperação.')
+                partes.append(parte)
+            documento = json.loads(_dpapi(b''.join(partes), False).decode('utf-8'))
+            plano = _validar_journal(json.loads(documento['conteudo']))
+            if documento.get('caminho') != plano['origem'] or documento.get('identidade') != plano['id_origem']:
+                raise ValueError('Identidade do journal inválida.')
+            yield arquivo, identidade, plano
+        finally:
+            os.close(fd)
+
+
+def _conteudo_handle(fd):
+    os.lseek(fd, 0, os.SEEK_SET)
+    partes, tamanho = [], 0
+    while parte := os.read(fd, 65536):
+        tamanho += len(parte)
+        if tamanho > LIMITE_EDICAO:
+            raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
+        partes.append(parte)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return b''.join(partes)
+
+
+@contextmanager
+def _revisao_fixa(journal):
+    with _abrir_plano_fixo(journal) as (arquivo, identidade, plano):
+        nome = plano.get('quarentena')
+        if not isinstance(nome, str) or not re.fullmatch(r'passe1-move-[0-9a-f]{32}', nome):
+            raise ValueError('Nome de quarentena inválido no journal.')
+        origem = Path(plano['origem'])
+        presente = os.path.lexists(origem)
+        em_quarentena = os.path.lexists(origem.with_name(nome))
+        if presente == em_quarentena:
+            raise ValueError('Origem e quarentena estão ausentes ou em conflito.')
+        with _par_fixo(origem, plano['destino'], plano, em_quarentena=em_quarentena, permitir_parcial=True) as (arquivos, diretorios):
+            atual = _conteudo_handle(arquivos['destino'])
+            revisao = hashlib.sha256(json.dumps({
+                'journal': list(identidade), 'plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
+                'destino': hashlib.sha256(atual).hexdigest(), 'quarentena': em_quarentena,
+            }, sort_keys=True).encode('utf-8')).hexdigest()
+            yield arquivo, plano, arquivos, diretorios, em_quarentena, revisao
+
+
+def _revisar_experimental(journal):
+    with _revisao_fixa(journal) as (_, _, _, _, em_quarentena, revisao):
+        return {'revisao': revisao, 'origem_em_quarentena': em_quarentena}
+
+
+def _recuperar_experimental(journal, revisao, *, confirmado=False):
+    if confirmado is not True:
+        raise ValueError('Recuperação exige confirmação explícita.')
+    with _revisao_fixa(journal) as (_, plano, arquivos, diretorios, em_quarentena, atual):
+        if not isinstance(revisao, str) or not hmac.compare_digest(revisao, atual):
+            raise ValueError('Estado mudou desde a revisão; recuperação recusada.')
+        _restaurar_conteudo(arquivos['destino'], plano['conteudo_destino'].encode('utf-8'), plano['conteudo_novo'].encode('utf-8'), confirmado=True)
+        if em_quarentena:
+            _renomear_handle(arquivos['origem'], diretorios['origem'], Path(plano['origem']).name)

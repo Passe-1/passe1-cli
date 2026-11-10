@@ -304,3 +304,118 @@ def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
     assert destino.read_text(encoding='utf-8') == 'novo'
     assert (tmp_path / 'quarentena.txt').read_text(encoding='utf-8') == 'origem'
     assert journal.exists() and b'origem' not in journal.read_bytes()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_movimentacao_experimental_preserva_original_e_journal(tmp_path):
+    import json
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    journal = win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, tmp_path)
+    plano = json.loads(win_secure._ler_journal(journal)['conteudo'])
+    assert not origem.exists()
+    assert destino.read_text(encoding='utf-8') == 'novo'
+    assert (tmp_path / plano['quarentena']).read_text(encoding='utf-8') == 'origem'
+    assert b'destino' not in journal.read_bytes()
+    revisao = win_move._revisar_experimental(journal)
+    assert revisao['origem_em_quarentena'] is True
+    with pytest.raises(ValueError, match='confirmação'):
+        win_move._recuperar_experimental(journal, revisao['revisao'])
+    win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert destino.read_text(encoding='utf-8') == 'destino'
+    assert not (tmp_path / plano['quarentena']).exists()
+    assert journal.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_movimentacao_interrompida_mantem_original_e_journal(tmp_path, monkeypatch):
+    import json
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+
+    def interromper(*_args):
+        raise OSError('falha simulada')
+
+    monkeypatch.setattr(win_move, '_renomear_handle', interromper)
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, tmp_path)
+    journal = next(tmp_path.glob('move-*.journal'))
+    plano = json.loads(win_secure._ler_journal(journal)['conteudo'])
+    assert plano['conteudo_destino'] == 'destino'
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert destino.read_text(encoding='utf-8') == 'novo'
+    revisao = win_move._revisar_experimental(journal)
+    assert revisao['origem_em_quarentena'] is False
+    win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    assert destino.read_text(encoding='utf-8') == 'destino'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_recuperacao_experimental_recusa_alteracao_apos_revisao(tmp_path):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem com espaços.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    journal = win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, tmp_path)
+    revisao = win_move._revisar_experimental(journal)
+    destino.write_text('terceiro', encoding='utf-8')
+    with pytest.raises(ValueError):
+        win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    assert destino.read_text(encoding='utf-8') == 'terceiro'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('fase', ['escrita', 'quarentena'])
+def test_recuperacao_experimental_apos_processo_interrompido(tmp_path, fase):
+    import subprocess
+    import sys
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    programa = '''
+import os, sys
+from passe1_engine import win_move, win_secure
+origem, destino, raiz, fase = sys.argv[1:]
+vo = win_secure.snapshot(origem)['identidade']
+vd = win_secure.snapshot(destino)['identidade']
+def interromper(fd, dados):
+    os.write(fd, dados[:1])
+    os.fsync(fd)
+    os._exit(91)
+if fase == 'escrita':
+    win_move._gravar_handle = interromper
+else:
+    renomear = win_move._renomear_handle
+    def interromper_renomeacao(*args):
+        renomear(*args)
+        os._exit(91)
+    win_move._renomear_handle = interromper_renomeacao
+win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, raiz)
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(origem), str(destino), str(tmp_path), fase], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    journal = next(tmp_path.glob('move-*.journal'))
+    if fase == 'escrita':
+        assert origem.read_text(encoding='utf-8') == 'origem'
+        assert destino.read_text(encoding='utf-8') == 'nestino'
+    else:
+        assert not origem.exists()
+        assert destino.read_text(encoding='utf-8') == 'novo'
+    revisao = win_move._revisar_experimental(journal)
+    win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert destino.read_text(encoding='utf-8') == 'destino'
