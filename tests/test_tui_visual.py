@@ -67,3 +67,27 @@ def test_streaming_rewrap_processa_apenas_delta_apos_historico_longo():
         interface.linhas = ['novo']
         interface._atualizar_transcricao(forcar=True)
         assert interface.transcricao.text == 'novo'
+
+
+def test_rodape_conta_etapas_sem_duplicar_eventos():
+    interface = Interface(None, 'modelo', 'ses_teste', [])
+    etapa = {'type': 'step-finish', 'id': 'p1', 'tokens': {'total': 1200}}
+    interface._registrar_uso(etapa)
+    interface._registrar_uso(etapa)
+    interface._registrar_uso({'type': 'step-finish', 'id': 'p2', 'tokens': {'input': 90, 'output': 10}})
+    assert '1.300 tokens' in ' '.join(interface._linhas_rodape())
+
+
+def test_troca_modelo_so_aceita_catalogo():
+    import asyncio
+
+    async def executar():
+        interface = Interface(None, 'modelo', 'ses_teste', [], ('modelo', 'outro'))
+        await interface.enviar('/modelo')
+        assert 'modelo (atual)' in interface.transcricao.text
+        await interface.enviar('/modelo inexistente')
+        assert interface.modelo == 'modelo'
+        await interface.enviar('/modelo outro')
+        assert interface.modelo == 'outro'
+
+    asyncio.run(executar())
