@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 
 
@@ -51,13 +52,67 @@ def _guardar_journal(caminho, conteudo, identidade):
             f.write(cifrado)
             f.flush()
             os.fsync(f.fileno())
+            info = os.fstat(f.fileno())
+            identidade = (info.st_dev, info.st_ino)
     except BaseException as exc:
         raise OSError(f"Não foi possível gravar journal; arquivo original não foi alterado. Verifique {arquivo}.") from exc
-    return arquivo
+    return arquivo, identidade
+
+
+def _abrir_journal(arquivo):
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    handle = kernel.CreateFileW(str(arquivo), 0x80010080, 1, None, 3, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | os.O_BINARY)
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise ValueError("Journal inválido ou possui links.")
+        return fd, (info.st_dev, info.st_ino)
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _ler_journal_com_id(arquivo):
+    fd, identidade = _abrir_journal(arquivo)
+    with os.fdopen(fd, "rb") as f:
+        dados = f.read()
+    return json.loads(_dpapi(dados, False).decode("utf-8")), identidade
 
 
 def _ler_journal(arquivo):
-    return json.loads(_dpapi(Path(arquivo).read_bytes(), False).decode("utf-8"))
+    return _ler_journal_com_id(arquivo)[0]
+
+
+def _apagar_journal(arquivo, identidade):
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    fd, atual = _abrir_journal(arquivo)
+    try:
+        if atual != tuple(identidade):
+            raise ValueError("Journal mudou; nenhum arquivo foi apagado.")
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        excluir = wintypes.BOOL(True)
+        if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        os.close(fd)
 
 
 def _gravar_handle(kernel, arquivo, texto):
@@ -97,13 +152,13 @@ def _criar(caminho, conteudo):
 def recuperar(caminho):
     """Restaura explicitamente backup de edição interrompida do mesmo arquivo."""
     arquivo = _journal_path(caminho)
-    dados = _ler_journal(arquivo)
+    dados, journal_id = _ler_journal_com_id(arquivo)
     if os.path.normcase(os.path.abspath(caminho)) != os.path.normcase(dados.get("caminho", "")):
         raise ValueError("Journal pertence a outro caminho.")
-    _operar(caminho, "", dados["conteudo"], recuperacao=dados)
+    _operar(caminho, "", dados["conteudo"], recuperacao=dados, journal_id=journal_id)
 
 
-def _operar(caminho, anterior, conteudo, recuperacao=None):
+def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
     import ctypes
     from ctypes import wintypes
 
@@ -196,7 +251,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None):
                     raise ValueError("Arquivo atual não corresponde ao journal.")
                 journal = _journal_path(alvo)
             else:
-                journal = _guardar_journal(alvo, anterior, identidade)
+                journal, journal_id = _guardar_journal(alvo, anterior, identidade)
             try:
                 _gravar_handle(kernel, arquivo, conteudo)
             except BaseException as exc:
@@ -207,7 +262,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None):
                 except BaseException as erro_restauracao:
                     raise OSError(f"Falha na edição e restauração; backup criptografado em {journal}.") from erro_restauracao
                 raise OSError(f"Falha na edição; conteúdo anterior restaurado. Backup em {journal}.") from exc
-            journal.unlink()
+            _apagar_journal(journal, journal_id)
             return
         try:
             dados = conteudo.encode('utf-8')

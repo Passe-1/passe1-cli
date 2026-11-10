@@ -305,14 +305,14 @@ def test_editar_recusa_versao_divergente(tmp_path):
 def test_backup_criptografado_nao_contem_texto_claro(tmp_path, monkeypatch):
     from passe1_engine import win_secure
     monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
-    journal = win_secure._guardar_journal(tmp_path / 'alvo.txt', 'segredo de teste', (1, 2, 3))
+    journal, identidade = win_secure._guardar_journal(tmp_path / 'alvo.txt', 'segredo de teste', (1, 2, 3))
     try:
         assert b'segredo de teste' not in journal.read_bytes()
         dados = win_secure._ler_journal(journal)
         assert dados['conteudo'] == 'segredo de teste'
         assert dados['identidade'] == [1, 2, 3]
     finally:
-        journal.unlink(missing_ok=True)
+        win_secure._apagar_journal(journal, identidade)
 
 
 def test_recupera_journal_apos_encerramento_durante_escrita(tmp_path, monkeypatch):
@@ -342,3 +342,16 @@ w.substituir(sys.argv[1], 'conteúdo original', 'novo')
     win_secure.recuperar(alvo)
     assert alvo.read_text(encoding='utf-8') == 'conteúdo original'
     assert not journal.exists()
+
+
+def test_limpeza_do_journal_nao_apaga_arquivo_substituido(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal, identidade = win_secure._guardar_journal(tmp_path / 'alvo.txt', 'segredo', (1, 2, 3))
+    anterior = journal.with_name('backup-original')
+    journal.rename(anterior)
+    journal.write_text('arquivo de terceiro', encoding='utf-8')
+    with pytest.raises(ValueError, match='mudou'):
+        win_secure._apagar_journal(journal, identidade)
+    assert journal.read_text(encoding='utf-8') == 'arquivo de terceiro'
+    assert anterior.exists()
