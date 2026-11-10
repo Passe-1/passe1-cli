@@ -45,7 +45,7 @@ class Gateway(BaseHTTPRequestHandler):
         self.wfile.write(corpo)
 
 
-def main():
+def main(destino_existe=True):
     if os.name != 'posix':
         raise SystemExit('Move transacional Windows ainda não está disponível.')
     import pexpect
@@ -56,7 +56,8 @@ def main():
         projeto.mkdir()
         origem, destino = projeto / 'origem.txt', projeto / 'destino.txt'
         origem.write_text('origem-ficticia\n', encoding='utf-8')
-        destino.write_text('destino-confidencial-ficticio\n', encoding='utf-8')
+        if destino_existe:
+            destino.write_text('destino-confidencial-ficticio\n', encoding='utf-8')
         servidor = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
         threading.Thread(target=servidor.serve_forever, daemon=True).start()
         try:
@@ -83,15 +84,20 @@ def main():
                 raise RuntimeError('Move produziu estado inesperado.')
             processo = pexpect.spawn(sys.executable, ['-I', '-m', 'passe1', 'recover-move', str(journals[0])], cwd=str(projeto), env=ambiente, encoding='utf-8', timeout=30)
             try:
-                processo.expect('destino-confidencial-ficticio')
+                processo.expect('destino-confidencial-ficticio' if destino_existe else 'origem-ficticia')
                 processo.expect('Restaurar o estado revisado')
                 processo.sendline('sim')
                 processo.expect('Recuperação concluída')
                 processo.expect(pexpect.EOF)
             finally:
                 processo.close(force=True)
-            if origem.read_text(encoding='utf-8') != 'origem-ficticia\n' or destino.read_text(encoding='utf-8') != 'destino-confidencial-ficticio\n':
-                raise RuntimeError('Recovery não restaurou ambos os arquivos.')
+            if origem.read_text(encoding='utf-8') != 'origem-ficticia\n':
+                raise RuntimeError('Recovery não restaurou a origem.')
+            if destino_existe:
+                if destino.read_text(encoding='utf-8') != 'destino-confidencial-ficticio\n':
+                    raise RuntimeError('Recovery não restaurou o destino.')
+            elif destino.exists():
+                raise RuntimeError('Recovery deixou o destino que antes estava ausente.')
             print('Move e recovery confirmados no wheel, sem expor backup ao modelo.')
         finally:
             servidor.shutdown()

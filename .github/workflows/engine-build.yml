@@ -72,6 +72,8 @@ jobs:
         run: python -m pytest tests/test_recover_move_cli.py -q
       - if: ${{ !cancelled() && runner.os != 'Windows' && steps.pexpect_ready.outcome == 'success' }}
         run: python scripts/smoke-move-recovery.py
+      - if: ${{ !cancelled() && runner.os != 'Windows' && steps.pexpect_ready.outcome == 'success' }}
+        run: python scripts/smoke-move-new-destination.py
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -m pytest tests/test_recuperacao_wheel.py -q
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
