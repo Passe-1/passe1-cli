@@ -137,3 +137,5 @@ No macOS e Linux, ao usar imagens, o CLI mantém cópias temporárias privadas a
 No Windows, a edição segura recusa arquivos acima de 64 MiB e arquivos abertos para gravação por outro programa; salve e feche o editor antes de tentar novamente. A recuperação de uma edição interrompida usa `passe1 recover CAMINHO` e exige confirmação em terminal.
 
 No macOS e Linux, movimentações com `apply_patch` usam journal e guardam cópias em quarentena. Se uma operação for interrompida, use `passe1 recover-move CAMINHO_DO_JOURNAL` em um terminal para revisar o diff sanitizado e confirmar a recuperação. As cópias e o journal permanecem após a operação; a revisão integral recusa conteúdo acima de 1 MiB. O journal não é autenticado contra processos maliciosos do mesmo usuário, e um pseudoterminal não comprova presença humana. A movimentação segura no Windows ainda está em desenvolvimento.
+
+O build do motor adquire automaticamente a trava cooperativa do submódulo. Para aplicar ou reverter patches manualmente, execute toda a sequência sob `python scripts/vendor_lock.py -- <comando>`; não execute operações Git diretas em `vendor/opencode` em paralelo com o build.

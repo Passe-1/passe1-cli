@@ -27,6 +27,7 @@ from passe1_engine.win_secure import (
 )
 
 _revisoes = {}
+LIMITE_MOVE_REVISAVEL = 1024 * 1024
 
 
 def _digest(texto):
@@ -36,6 +37,13 @@ def _digest(texto):
     if len(dados) > LIMITE_EDICAO:
         raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
     return hashlib.sha256(dados).hexdigest()
+
+
+def _verificar_tamanho_revisavel(*textos):
+    if any(not isinstance(texto, str) for texto in textos):
+        raise TypeError('Conteúdo inválido para movimentação.')
+    if sum(len(texto.encode('utf-8')) for texto in textos) > LIMITE_MOVE_REVISAVEL:
+        raise ValueError('Move exige recuperação revisável; conteúdo total excede 1 MiB. Nenhum arquivo foi alterado.')
 
 
 def _estado(origem, destino, plano):
@@ -414,6 +422,127 @@ def _preparar_arquivo_temporario(destino, pais_aprovados, *, _nome=None, _descar
 
 
 @contextmanager
+def _criar_pais_fixo(destino, pais_aprovados):
+    """Experimento: cria pais faltantes por handles após a aprovação.
+
+    Diretórios criados não são apagados automaticamente após uma queda; a
+    identidade completa deve ser registrada antes de publicar arquivos.
+    """
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
+
+    caminho = Path(os.path.abspath(destino))
+    partes = caminho.parts
+    if not isinstance(pais_aprovados, list) or not pais_aprovados or len(pais_aprovados) > len(partes) - 1:
+        raise ValueError('Identidades de diretórios inválidas.')
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+
+    def identidade(handle):
+        info = _Info()
+        if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & 0x400 or not info.attributes & 0x10:
+            raise ValueError('Diretório inválido ou com reparse.')
+        return [str(info.volume), str(info.index_high), str(info.index_low)]
+
+    def acesso_pai(indice):
+        ultimo = len(partes) - 2
+        acesso = 0x100081
+        if indice == ultimo:
+            acesso |= 2  # FILE_ADD_FILE
+        elif indice >= len(pais_aprovados) - 1:
+            acesso |= 4  # FILE_ADD_SUBDIRECTORY
+        if indice >= len(pais_aprovados):
+            acesso |= 0x10000  # DELETE para identificação e recuperação futuras
+        return acesso
+
+    raiz = kernel.CreateFileW(partes[0], acesso_pai(0), 3, None, 3, 0x02200000, None)
+    if raiz == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    handles = [raiz]
+    try:
+        ids = [identidade(raiz)]
+        if ids[0] != pais_aprovados[0]:
+            raise ValueError('Raiz mudou após aprovação.')
+        pai = raiz
+        for indice, componente in enumerate(partes[1:-1], 1):
+            if componente in ('.', '..') or ':' in componente or componente.endswith((' ', '.')):
+                raise ValueError('Componente inválido.')
+            criando = indice >= len(pais_aprovados)
+            buffer = ctypes.create_unicode_buffer(componente)
+            tamanho = len(componente.encode('utf-16-le'))
+            palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attrs = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+            resultado, ios = wintypes.HANDLE(), _Io()
+            acesso = acesso_pai(indice)
+            status = ntdll.NtCreateFile(ctypes.byref(resultado), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3, 2 if criando else 1, 0x00200021, None, 0)
+            if status < 0:
+                raise OSError(f'NtCreateFile do diretório falhou: 0x{status & 0xffffffff:08x}')
+            pai = resultado.value
+            handles.append(pai)
+            ids.append(identidade(pai))
+            if not criando and ids[-1] != pais_aprovados[indice]:
+                raise ValueError('Diretório mudou após aprovação.')
+        yield pai, ids
+    finally:
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)
+
+
+@contextmanager
+def _criar_stage_relativo(pai, nome):
+    """Cria stage persistente exclusivamente relativo ao diretório fixado."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
+
+    if not isinstance(nome, str) or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome):
+        raise ValueError('Nome de stage inválido.')
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    buffer = ctypes.create_unicode_buffer(nome)
+    tamanho = len(nome.encode('utf-16-le'))
+    palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+    attrs = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+    handle, ios = wintypes.HANDLE(), _Io()
+    status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110180, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 0, 2, 0x00200060, None, 0)
+    if status < 0:
+        raise OSError(f'NtCreateFile do stage falhou: 0x{status & 0xffffffff:08x}')
+    try:
+        info = _Info()
+        if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if info.attributes & (0x400 | 0x10) or info.links != 1:
+            raise ValueError('Stage inválido ou com links.')
+        fd = msvcrt.open_osfhandle(handle.value, os.O_RDWR | os.O_BINARY)
+        handle = None
+        try:
+            yield fd, [str(info.volume), str(info.index_high), str(info.index_low)]
+        finally:
+            os.close(fd)
+    finally:
+        if handle is not None:
+            kernel.CloseHandle(handle)
+
+
+@contextmanager
 def _preparar_stage_registrado(journal):
     """Cria etapa persistente somente após fixar journal com nome aprovado.
 
@@ -424,14 +553,13 @@ def _preparar_stage_registrado(journal):
         nome = plano.get('stage')
         if plano.get('destino_ausente') is not True or not isinstance(nome, str) or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome):
             raise ValueError('Plano de destino ausente inválido.')
-        with _preparar_arquivo_temporario(plano['destino'], plano['pais_destino'], _nome=nome, _descartar_ao_fechar=False) as resultado:
-            yield resultado
-            fd, _pai, _nome, id_stage = resultado
+        with _criar_pais_fixo(plano['destino'], plano['pais_destino']) as (pai, pais_atuais), _criar_stage_relativo(pai, nome) as (fd, id_stage):
+            yield fd, pai, nome, id_stage
             if not hmac.compare_digest(hashlib.sha256(_conteudo_handle(fd)).hexdigest(), plano['hash_novo']):
                 raise ValueError('Conteúdo do stage divergiu do plano aprovado.')
             registro = {
                 'versao': 1, 'journal': list(id_journal), 'stage': nome,
-                'id_stage': id_stage, 'pais_destino': plano['pais_destino'],
+                'id_stage': id_stage, 'pais_destino': pais_atuais,
                 'hash_novo': plano['hash_novo'],
                 'hash_plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
             }
@@ -460,7 +588,9 @@ def _abrir_registro_stage(journal):
                 or registro.get('versao') != 1
                 or registro.get('journal') != list(id_journal)
                 or registro.get('stage') != plano.get('stage')
-                or registro.get('pais_destino') != plano.get('pais_destino')
+                or not isinstance(registro.get('pais_destino'), list)
+                or len(registro['pais_destino']) != len(Path(plano['destino']).parts) - 1
+                or registro['pais_destino'][:len(plano['pais_destino'])] != plano['pais_destino']
                 or registro.get('hash_novo') != plano.get('hash_novo')
                 or registro.get('hash_plano') != esperado
                 or documento.get('caminho') != plano['destino']
@@ -629,6 +759,38 @@ def _publicar_ausente_experimental(journal):
         raise RuntimeError(f'Publicação interrompida; journal preservado: {str(journal)!r}') from exc
 
 
+def _mover_ausente_experimental(origem, destino, anterior_origem, novo, identidade_origem, identidade_destino, journal_root):
+    """Orquestra protótipo de destino novo; ainda desconectado do runtime."""
+    _verificar_tamanho_revisavel(anterior_origem, novo)
+    if not isinstance(identidade_origem, dict) or not isinstance(identidade_destino, dict):
+        raise TypeError('Identidades aprovadas inválidas.')
+    if identidade_destino.get('arquivo') is not None:
+        raise ValueError('Identidade de destino ausente inválida.')
+    plano = {
+        'versao': 1, 'origem': os.path.abspath(origem), 'destino': os.path.abspath(destino),
+        'id_origem': identidade_origem.get('arquivo'), 'id_destino': None,
+        'pais_origem': identidade_origem.get('pais'), 'pais_destino': identidade_destino.get('pais'),
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': anterior_origem, 'hash_origem': _digest(anterior_origem),
+        'conteudo_novo': novo, 'hash_novo': _digest(novo),
+        'stage': 'passe1-stage-' + secrets.token_hex(16),
+        'quarentena': 'passe1-move-' + secrets.token_hex(16),
+    }
+    _validar_journal(plano)
+    journal = None
+    try:
+        with _origem_fixa(plano), _journal_fixo(journal_root, plano) as (journal, _):
+            pass
+        with _preparar_stage_registrado(journal) as (fd, _, _, _):
+            _gravar_handle(fd, novo.encode('utf-8'))
+        identidade = _publicar_ausente_experimental(journal)
+        return journal, identidade
+    except BaseException as exc:
+        if journal is not None:
+            raise RuntimeError(f'Movimentação interrompida; journal preservado: {str(journal)!r}') from exc
+        raise
+
+
 @contextmanager
 def _revisao_ausente_fixa(journal):
     with _abrir_plano_fixo(journal) as (_, _, plano_inicial):
@@ -698,6 +860,7 @@ def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo
     Não deve ser exposto ao usuário até a recuperação transacional, validação
     de interrupções e revisão do Windows estarem implementadas.
     """
+    _verificar_tamanho_revisavel(anterior_origem, anterior_destino, novo)
     if not isinstance(identidade_origem, dict) or not isinstance(identidade_destino, dict):
         raise TypeError('Identidades aprovadas inválidas.')
     plano = {

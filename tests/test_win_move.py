@@ -395,6 +395,28 @@ def test_stage_persistente_exige_journal_previo_e_nao_sobrescreve(tmp_path):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_criacao_de_pais_aninhados_so_apos_snapshot_e_sem_adotar_terceiro(tmp_path):
+    from passe1_engine import win_secure
+
+    destino = tmp_path / 'nova' / 'filha' / 'destino.txt'
+    pais = win_secure.snapshot_pais(destino)['pais']
+    assert not destino.parent.exists()
+    with win_move._criar_pais_fixo(destino, pais) as (_pai, ids):
+        assert destino.parent.is_dir()
+        assert ids[:len(pais)] == pais and len(ids) == len(pais) + 2
+    assert win_secure.snapshot_pais(destino)['pais'] == ids
+    outro = tmp_path / 'terceiro' / 'filha' / 'destino.txt'
+    previa = win_secure.snapshot_pais(outro)['pais']
+    (tmp_path / 'terceiro').mkdir()
+    marcador = tmp_path / 'terceiro' / 'preservar'
+    marcador.write_text('não tocar', encoding='utf-8')
+    with pytest.raises(OSError), win_move._criar_pais_fixo(outro, previa):
+        pytest.fail('Não deve adotar diretório criado por terceiro.')
+    assert marcador.read_text(encoding='utf-8') == 'não tocar'
+    assert not outro.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 @pytest.mark.parametrize('fase', ['antes-registro', 'apos-registro'])
 def test_queda_durante_preparacao_de_stage_preserva_origem(tmp_path, fase):
     import json
@@ -612,6 +634,53 @@ win_move._publicar_ausente_experimental(journal)
     win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
     assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
     assert not (tmp_path / plano['stage']).exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_destino_ausente_aninhado_e_add_reutiliza_identidade_pais(tmp_path):
+    from passe1_engine import secure_write, win_secure
+
+    origem = tmp_path / 'origem.txt'
+    destino = tmp_path / 'nova' / 'filha' / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    prefixo = win_secure.snapshot_pais(destino)['pais']
+    assert not destino.parent.exists()
+    journal, resultado = win_move._mover_ausente_experimental(origem, destino, 'origem', 'novo', vo, {'pais': prefixo, 'arquivo': None}, tmp_path)
+    assert resultado['pais'][:len(prefixo)] == prefixo and len(resultado['pais']) == len(prefixo) + 2
+    outro = destino.with_name('adicional.txt')
+    secure_write.substituir(outro, None, 'adicional', {'pais': resultado['pais'], 'arquivo': None})
+    assert outro.read_text(encoding='utf-8') == 'adicional'
+    revisao = win_move._revisar_ausente_experimental(journal)
+    win_move._recuperar_ausente_experimental(journal, revisao['revisao'], confirmado=True)
+    assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
+    assert outro.read_text(encoding='utf-8') == 'adicional'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('existente', [False, True])
+def test_move_grande_e_recusado_antes_de_criar_journal_ou_alterar_arquivos(tmp_path, existente):
+    from passe1_engine import win_secure
+
+    origem = tmp_path / 'origem.txt'
+    destino = tmp_path / ('destino.txt' if existente else 'nova/filha/destino.txt')
+    origem.write_text('origem', encoding='utf-8')
+    if existente:
+        destino.write_text('destino', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    vd = win_secure.snapshot(destino)['identidade'] if existente else win_secure.snapshot_pais(destino)
+    novo = 'x' * (win_move.LIMITE_MOVE_REVISAVEL + 1)
+    with pytest.raises(ValueError, match='1 MiB'):
+        if existente:
+            win_move._mover_experimental(origem, destino, 'origem', 'destino', novo, vo, vd, tmp_path)
+        else:
+            win_move._mover_ausente_experimental(origem, destino, 'origem', novo, vo, vd, tmp_path)
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    if existente:
+        assert destino.read_text(encoding='utf-8') == 'destino'
+    else:
+        assert not destino.parent.exists()
+    assert not list(tmp_path.glob('move-*.journal'))
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
