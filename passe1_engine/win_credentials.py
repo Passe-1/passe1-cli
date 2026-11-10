@@ -103,7 +103,7 @@ def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
                     raise ValueError('Diretório de credenciais mudou durante a verificação.')
                 donos_confiaveis = []
                 try:
-                    for nome_sid in ('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0'):
+                    for nome_sid in ('S-1-5-18', 'S-1-5-32-544', 'S-1-3-0', 'S-1-3-4'):
                         sid_confiavel = ctypes.c_void_p()
                         if not a.ConvertStringSidToSidW(nome_sid, ctypes.byref(sid_confiavel)):
                             raise ctypes.WinError(ctypes.get_last_error())
@@ -129,7 +129,8 @@ def _abrir(caminho, *, gravar, ignorar_journal=False, permitir_criar=True):
                                 continue
                             if cabecalho[0] != 0 or not a.IsValidSid(ace.value + 8):
                                 raise DiretorioInseguro('DACL do diretório não pode ser validada com segurança.')
-                            if confiavel(ace.value + 8) or (cabecalho[1] & 0x08 and a.EqualSid(donos_confiaveis[2], ace.value + 8)):
+                            if (confiavel(ace.value + 8) or a.EqualSid(donos_confiaveis[3], ace.value + 8)
+                                    or (cabecalho[1] & 0x08 and a.EqualSid(donos_confiaveis[2], ace.value + 8))):
                                 continue
                             mascara = ctypes.c_uint32.from_address(ace.value + 4).value
                             perigo_pai = not cabecalho[1] & 0x08 and mascara & (0x40 | 0x10000 | 0x40000 | 0x80000 | 0x10000000)
