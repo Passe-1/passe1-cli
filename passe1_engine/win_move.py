@@ -83,6 +83,43 @@ def _escrita_interrompida(anterior, novo, atual):
     return ultimo_diferente_do_anterior < primeiro_diferente_do_novo
 
 
+def _gravar_handle(fd, dados):
+    """Escreve e sincroniza no handle fixado; requer journal prévio do chamador."""
+    if not isinstance(dados, bytes):
+        raise TypeError('Conteúdo deve estar em bytes.')
+    if len(dados) > LIMITE_EDICAO:
+        raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
+    os.lseek(fd, 0, os.SEEK_SET)
+    posicao = 0
+    while posicao < len(dados):
+        gravados = os.write(fd, dados[posicao:])
+        if gravados <= 0:
+            raise OSError('Escrita incompleta durante movimentação.')
+        posicao += gravados
+    os.ftruncate(fd, len(dados))
+    os.fsync(fd)
+
+
+def _restaurar_conteudo(fd, anterior, novo, *, confirmado=False):
+    """Restaura somente bytes compatíveis, após validação do handle pelo chamador."""
+    if confirmado is not True:
+        raise ValueError('Recuperação exige confirmação explícita.')
+    if not isinstance(anterior, bytes) or not isinstance(novo, bytes):
+        raise TypeError('Conteúdo de recuperação deve estar em bytes.')
+    if max(len(anterior), len(novo)) > LIMITE_EDICAO:
+        raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
+    os.lseek(fd, 0, os.SEEK_SET)
+    partes, tamanho = [], 0
+    while parte := os.read(fd, 65536):
+        tamanho += len(parte)
+        if tamanho > LIMITE_EDICAO:
+            raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
+        partes.append(parte)
+    if not _escrita_interrompida(anterior, novo, b''.join(partes)):
+        raise ValueError('Conteúdo divergiu; recuperação recusada.')
+    _gravar_handle(fd, anterior)
+
+
 def _validar_journal(dados):
     if not isinstance(dados, dict) or dados.get('versao') != 1:
         raise ValueError('Journal de movimentação inválido.')

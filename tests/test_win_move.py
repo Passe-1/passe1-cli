@@ -58,6 +58,61 @@ def test_escrita_interrompida_equivale_a_todos_prefixos_pequenos():
                 assert win_move._escrita_interrompida(anterior, novo, atual) == (atual in possiveis)
 
 
+def test_escrita_no_handle_preserva_identidade_e_limita_tamanho(tmp_path):
+    arquivo = tmp_path / 'arquivo'
+    arquivo.write_bytes(b'antigo-com-sobra')
+    identidade = arquivo.stat().st_ino
+    fd = os.open(arquivo, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    try:
+        win_move._gravar_handle(fd, b'novo')
+    finally:
+        os.close(fd)
+    assert arquivo.stat().st_ino == identidade
+    assert arquivo.read_bytes() == b'novo'
+
+
+def test_falha_de_escrita_deixa_estado_reconhecivel(tmp_path, monkeypatch):
+    arquivo = tmp_path / 'arquivo'
+    antigo, novo = b'conteudo antigo', b'CONTEUDO novo'
+    arquivo.write_bytes(antigo)
+    fd = os.open(arquivo, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    escrever = os.write
+    chamadas = []
+
+    def falhar(fd_atual, dados):
+        chamadas.append(1)
+        if len(chamadas) > 1:
+            raise OSError('falha simulada')
+        return escrever(fd_atual, dados[:4])
+
+    monkeypatch.setattr(win_move.os, 'write', falhar)
+    try:
+        with pytest.raises(OSError, match='falha simulada'):
+            win_move._gravar_handle(fd, novo)
+    finally:
+        os.close(fd)
+    assert win_move._escrita_interrompida(antigo, novo, arquivo.read_bytes())
+
+
+def test_restaurar_exige_confirmacao_e_recusa_conteudo_divergente(tmp_path):
+    arquivo = tmp_path / 'arquivo'
+    antigo, novo = b'conteudo antigo', b'CONTEUDO novo'
+    arquivo.write_bytes(b'CONT' + antigo[4:])
+    fd = os.open(arquivo, os.O_RDWR | getattr(os, 'O_BINARY', 0))
+    try:
+        with pytest.raises(ValueError, match='confirmação'):
+            win_move._restaurar_conteudo(fd, antigo, novo)
+        win_move._restaurar_conteudo(fd, antigo, novo, confirmado=True)
+        assert arquivo.read_bytes() == antigo
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, b'terceiro')
+        with pytest.raises(ValueError, match='divergiu'):
+            win_move._restaurar_conteudo(fd, antigo, novo, confirmado=True)
+        assert arquivo.read_bytes().startswith(b'terceiro')
+    finally:
+        os.close(fd)
+
+
 def test_journal_recusa_troca_de_conteudo_identidade_ou_pais(tmp_path):
     plano = {
         'versao': 1, 'origem': str(tmp_path / 'a'), 'destino': str(tmp_path / 'b'),
