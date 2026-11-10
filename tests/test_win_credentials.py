@@ -203,7 +203,7 @@ def test_outro_usuario_nao_pode_apagar_journal_e_burlar_bloqueio():
     from passe1_engine import win_credentials
 
     nome = 'p1' + secrets.token_hex(6)
-    senha = 'P1!' + secrets.token_urlsafe(24) + 'a9'
+    senha = 'P1!a' + secrets.token_hex(5)
     criado = False
     publico = os.environ.get('PUBLIC')
     if not publico:
