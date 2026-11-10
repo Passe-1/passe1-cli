@@ -349,3 +349,35 @@ def test_staging_windows_usa_bytes_validados_e_aguarda_supervisor(tmp_path, monk
     assert eventos[1][0:2] == ('executou', dados)
     assert eventos[2] == ('limpou',)
     assert not staged.exists()
+
+
+def test_windows_distingue_erro_do_motor_e_de_limpeza(tmp_path, monkeypatch):
+    import argparse
+    from contextlib import contextmanager
+    import pytest
+    from passe1_engine import win_image_adapter
+    imagem = tmp_path / 'foto.png'
+    imagem.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+    staged = tmp_path / 'staged.png'
+    staged.write_bytes(imagem.read_bytes())
+    args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=False, image=[str(imagem)], tarefa=['teste'])
+    monkeypatch.setattr(launcher, '_eh_windows', lambda: True)
+    @contextmanager
+    def preparado(_itens):
+        yield [staged]
+    @contextmanager
+    def falha_limpeza(_itens):
+        yield [staged]
+        raise OSError('falha limpeza')
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}):
+        with patch.object(win_image_adapter, 'preparar_imagens', side_effect=preparado), \
+             patch.object(launcher, '_supervision', side_effect=OSError('falha motor')):
+            with pytest.raises(ValueError, match='iniciar o motor'):
+                launcher.iniciar([], agente=args)
+        with patch.object(win_image_adapter, 'preparar_imagens', side_effect=falha_limpeza), \
+             patch.object(launcher, '_supervision', return_value=0):
+            with pytest.raises(ValueError, match='preparar ou limpar'):
+                launcher.iniciar([], agente=args)

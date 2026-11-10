@@ -241,7 +241,10 @@ def iniciar(argv=None, *, agente=None, tui=False):
                 from passe1_engine.win_image_adapter import preparar_imagens
                 try:
                     with preparar_imagens(itens) as caminhos:
-                        return executar_com_imagens(caminhos)
+                        try:
+                            return executar_com_imagens(caminhos)
+                        except OSError as exc:
+                            raise ValueError("Não foi possível iniciar o motor do Passe1.") from exc
                 except OSError as exc:
                     raise ValueError("Não foi possível preparar ou limpar o staging privado de imagens no Windows.") from exc
             if itens:
