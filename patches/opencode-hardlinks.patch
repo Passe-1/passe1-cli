@@ -1,3 +1,28 @@
+diff --git a/packages/opencode/src/session/instruction.ts b/packages/opencode/src/session/instruction.ts
+index 7f593550..66f7d7b1 100644
+--- a/packages/opencode/src/session/instruction.ts
++++ b/packages/opencode/src/session/instruction.ts
+@@ -11,6 +11,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
+ import { FSUtil } from "@opencode-ai/core/fs-util"
+ import { withTransientReadRetry } from "@/util/effect-http-client"
+ import { Global } from "@opencode-ai/core/global"
++import { lerSeguro, verificar } from "../tool/hardlink"
+ import type { MessageV2 } from "./message-v2"
+ import type { MessageID } from "./schema"
+ 
+@@ -89,7 +90,11 @@ const layer: Layer.Layer<
+     })
+ 
+     const read = Effect.fnUntraced(function* (filepath: string) {
+-      return yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
++      return yield* verificar(fs, filepath).pipe(
++        Effect.andThen(Effect.tryPromise({ try: () => lerSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })),
++        Effect.map((bytes) => new TextDecoder().decode(bytes)),
++        Effect.catch(() => Effect.succeed("")),
++      )
+     })
+ 
+     const fetch = Effect.fnUntraced(function* (url: string) {
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 index 3f89a639..9ce5e5db 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
@@ -96,10 +121,10 @@ index 6ea67124..ad0cf394 100644
  
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..e8c09342
+index 00000000..04e2110d
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,45 @@
+@@ -0,0 +1,66 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
@@ -145,19 +170,73 @@ index 00000000..e8c09342
 +    [".env.", "credentials.", "secrets.", "secret.", "token.", "private_key", "id_rsa", "id_ed25519", "id_ecdsa", "service-account"].some((prefix) => name.startsWith(prefix)) ||
 +    [".env", ".pem", ".key", ".p12", ".pfx", ".keystore"].some((suffix) => name.endsWith(suffix))
 +}
++
++// Read through one descriptor; never reopen a checked path for its contents.
++export async function lerSeguro(file: string): Promise<Uint8Array> {
++  const before = await fs.lstat(file)
++  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error("Arquivo inválido ou possui múltiplos links.")
++  const constants = (await import("node:fs")).constants
++  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
++  try {
++    const opened = await handle.stat()
++    if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino)
++      throw new Error("Arquivo mudou durante a abertura.")
++    if (opened.size > 64 * 1024 * 1024) throw new Error("Arquivo excede o limite de leitura de 64 MiB.")
++    const bytes = await handle.readFile()
++    const after = await handle.stat()
++    if (after.nlink !== 1 || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
++      throw new Error("Arquivo mudou durante a leitura.")
++    return bytes
++  } finally {
++    await handle.close()
++  }
++}
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 678ed445..447fe219 100644
+index 678ed445..80c84ccb 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
 @@ -7,6 +7,7 @@ import { LSP } from "@/lsp/lsp"
  import DESCRIPTION from "./read.txt"
  import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { sensitive, verificar } from "./hardlink"
++import { lerSeguro, sensitive, verificar } from "./hardlink"
  import { Instruction } from "../session/instruction"
  import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
  
-@@ -236,6 +237,8 @@ export const ReadTool = Tool.define<
+@@ -119,22 +120,7 @@ export const ReadTool = Tool.define<
+       yield* lsp.touchFile(filepath).pipe(Effect.ignoreCause, Effect.forkIn(scope))
+     })
+ 
+-    const readSample = Effect.fn("ReadTool.readSample")(function* (
+-      filepath: string,
+-      fileSize: number,
+-      sampleSize: number,
+-    ) {
+-      if (fileSize === 0) return new Uint8Array()
+-
+-      return yield* Effect.scoped(
+-        Effect.gen(function* () {
+-          const file = yield* fs.open(filepath, { flag: "r" })
+-          return Option.getOrElse(yield* file.readAlloc(Math.min(sampleSize, fileSize)), () => new Uint8Array())
+-        }),
+-      )
+-    })
+-
+-    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
++    const lines = Effect.fn("ReadTool.lines")(function* (bytes: Uint8Array, opts: { limit: number; offset: number }) {
+       const start = opts.offset - 1
+       const raw: string[] = []
+       const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
+@@ -145,7 +131,7 @@ export const ReadTool = Tool.define<
+       // line of the upstream splitLines pipeline) and use a tagged error to stop the
+       // upstream file stream as soon as the byte cap is reached.
+       const decoder = new TextDecoder("utf-8")
+-      yield* fs.stream(filepath).pipe(
++      yield* Stream.fromIterable([bytes]).pipe(
+         Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+         Stream.splitLines,
+         Stream.runForEach((text) =>
+@@ -236,6 +222,8 @@ export const ReadTool = Tool.define<
          filepath = path.resolve(instance.directory, filepath)
        }
        if (process.platform === "win32") {
@@ -166,7 +245,7 @@ index 678ed445..447fe219 100644
          filepath = FSUtil.normalizePath(filepath)
        }
        const title = path.relative(instance.worktree, filepath)
-@@ -260,6 +263,15 @@ export const ReadTool = Tool.define<
+@@ -260,6 +248,15 @@ export const ReadTool = Tool.define<
        })
  
        if (!stat) return yield* miss(filepath)
@@ -182,6 +261,33 @@ index 678ed445..447fe219 100644
  
        if (stat.type === "Directory") {
          const items = yield* list(filepath)
+@@ -297,14 +294,15 @@ export const ReadTool = Tool.define<
+         }
+       }
+ 
++      yield* verificar(fs, filepath)
++      const bytes = yield* Effect.tryPromise({ try: () => lerSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
+       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
+-      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
++      const sample = bytes.subarray(0, SAMPLE_BYTES)
+ 
+       const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
+       const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
+ 
+       if (isImage || isPdfAttachment(mime)) {
+-        const bytes = yield* fs.readFile(filepath)
+         const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
+         return {
+           title,
+@@ -328,7 +326,7 @@ export const ReadTool = Tool.define<
+         return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
+       }
+ 
+-      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
++      const file = yield* lines(bytes, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
+       if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
+         return yield* Effect.fail(
+           new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 index 37be6d8c..697823a5 100644
 --- a/packages/opencode/src/tool/write.ts
@@ -302,7 +408,7 @@ index 13858f9f..29c477e1 100644
    )
  })
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index c1ef61b2..a8e4933c 100644
+index c1ef61b2..0db9e157 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
@@ -313,11 +419,27 @@ index c1ef61b2..a8e4933c 100644
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -312,6 +313,41 @@ describe("tool.read env file permissions", () => {
+@@ -312,6 +313,57 @@ describe("tool.read env file permissions", () => {
    }
  })
  
 +describe("Passe1 hard links", () => {
++  it.instance("recusa troca por symlink durante aprovação", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, "credencial.pem")
++    const alvo = path.join(test.directory, "outro.txt")
++    yield* Effect.promise(() => Bun.write(arquivo, "conteudo aprovado"))
++    yield* Effect.promise(() => Bun.write(alvo, "segredo externo"))
++    const next = { ...ctx, ask: (request: any) => Effect.promise(async () => {
++      if (request.permission === "passe1_sensitive_read") {
++        await fs.unlink(arquivo)
++        await fs.symlink(alvo, arquivo)
++      }
++    }) }
++    const erro = yield* fail(test.directory, { filePath: arquivo }, next)
++    expect(erro.message).toContain("link simbólico")
++  }))
++
 +  it.instance("solicita aprovação para nome sensível em maiúsculas", () =>
 +    Effect.gen(function* () {
 +      const test = yield* TestInstance
@@ -355,6 +477,22 @@ index c1ef61b2..a8e4933c 100644
  describe("tool.read truncation", () => {
    it.instance("truncates large file by bytes and sets truncated metadata", () =>
      Effect.gen(function* () {
+@@ -568,6 +620,15 @@ root_type Monster;`
+ })
+ 
+ describe("tool.read loaded instructions", () => {
++  it.live("não inclui instruções que são hard link para segredo", () => Effect.gen(function* () {
++    const dir = yield* tmpdirScoped()
++    yield* put(path.join(dir, "subdir", ".env"), "SEGREDO_FIXTURE")
++    yield* put(path.join(dir, "subdir", "nested", "test.txt"), "texto")
++    yield* Effect.promise(() => fs.link(path.join(dir, "subdir", ".env"), path.join(dir, "subdir", "AGENTS.md")))
++    const result = yield* exec(dir, { filePath: path.join(dir, "subdir", "nested", "test.txt") })
++    expect(result.output).not.toContain("SEGREDO_FIXTURE")
++  }))
++
+   it.live("loads AGENTS.md from parent directory and includes in metadata", () =>
+     Effect.gen(function* () {
+       const dir = yield* tmpdirScoped()
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 index 4f897dc8..0e2c55cb 100644
 --- a/packages/opencode/test/tool/write.test.ts

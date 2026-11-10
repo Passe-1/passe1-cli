@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 from unittest.mock import patch
 
 from passe1_engine import launcher
@@ -79,7 +80,7 @@ def test_preserva_instrucoes_do_projeto(tmp_path, monkeypatch):
     sub = tmp_path / 'sub'
     sub.mkdir()
     monkeypatch.chdir(sub)
-    assert launcher._instrucoes() == [str(instrucoes)]
+    assert Path(launcher._instrucoes()[0]).read_text() == instrucoes.read_text()
 
 
 def test_logout_remove_credencial_do_motor(tmp_path, monkeypatch):
@@ -96,7 +97,7 @@ def test_preserva_claude_md_quando_nao_ha_agents(tmp_path, monkeypatch):
     instrucoes = tmp_path / 'CLAUDE.md'
     instrucoes.write_text('Instruções')
     monkeypatch.chdir(tmp_path)
-    assert launcher._instrucoes() == [str(instrucoes)]
+    assert Path(launcher._instrucoes()[0]).read_text() == instrucoes.read_text()
 
 
 def test_logout_apaga_chave_mesmo_se_motor_falhar(tmp_path, monkeypatch):
@@ -149,3 +150,13 @@ def test_agente_legado_recusa_sandbox_nao_suportado(tmp_path, capsys):
         assert launcher.iniciar([], agente=args) == 1
         executar.assert_not_called()
     assert 'macOS' in capsys.readouterr().out
+
+
+def test_instrucoes_recusa_hardlink_para_segredo(tmp_path, monkeypatch):
+    import os
+    (tmp_path / '.git').mkdir()
+    segredo = tmp_path / '.env'
+    segredo.write_text('segredo')
+    os.link(segredo, tmp_path / 'AGENTS.md')
+    monkeypatch.chdir(tmp_path)
+    assert launcher._instrucoes() == []

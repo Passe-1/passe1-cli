@@ -86,8 +86,13 @@ def _instrucoes():
     for nome in ("AGENTS.md", "CLAUDE.md", "CONTEXT.md"):
         for diretorio in diretorios:
             arquivo = diretorio / nome
-            if arquivo.is_file() and not arquivo.is_symlink():
-                return [str(arquivo)]
+            try:
+                info = arquivo.lstat()
+                if arquivo.is_symlink() or not arquivo.is_file() or info.st_nlink != 1:
+                    continue
+            except OSError:
+                continue
+            return [str(arquivo)]
     return []
 
 
