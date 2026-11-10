@@ -31,3 +31,12 @@ def test_wheel_recusa_arquitetura_desconhecida():
 
 def test_wheel_respeita_minimo_dos_binarios():
     assert _normalizar("macosx_11_0_arm64", "arm64", [(13, 0), (11, 0)]) == "macosx_13_0_arm64"
+
+
+def test_minimo_binario_arredonda_patch(monkeypatch):
+    import runpy
+    modulo = runpy.run_path(str(Path(__file__).resolve().parents[1] / "scripts" / "wheel_tag.py"))
+    for comando, campo in (("LC_BUILD_VERSION", "minos"), ("LC_VERSION_MIN_MACOSX", "version")):
+        saida = f"Load command 1\n cmd {comando}\n {campo} 13.2.1\n"
+        monkeypatch.setattr(modulo["subprocess"], "check_output", lambda *args, saida=saida, **kwargs: saida)
+        assert modulo["minimo_binario"]("opencode") == (13, 3)

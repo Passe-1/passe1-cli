@@ -8,13 +8,13 @@ def minimo_binario(caminho):
     secoes = re.split(r"Load command \d+", saida)
     for secao in secoes:
         if "LC_BUILD_VERSION" in secao:
-            match = re.search(r"\bminos (\d+)\.(\d+)", secao)
+            match = re.search(r"\bminos (\d+)\.(\d+)(?:\.(\d+))?", secao)
         elif "LC_VERSION_MIN_MACOSX" in secao:
-            match = re.search(r"\bversion (\d+)\.(\d+)", secao)
+            match = re.search(r"\bversion (\d+)\.(\d+)(?:\.(\d+))?", secao)
         else:
             continue
         if match:
-            return int(match.group(1)), int(match.group(2))
+            return int(match.group(1)), int(match.group(2)) + bool(int(match.group(3) or 0))
     raise ValueError(f"Versão mínima macOS ausente em {caminho}")
 
 
