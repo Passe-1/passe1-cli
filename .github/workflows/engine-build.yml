@@ -46,6 +46,8 @@ jobs:
       - if: runner.os == 'Windows'
         run: python -m pip install pytest httpx
       - if: runner.os == 'Windows'
+        env:
+          PASSE1_TEST_MULTIUSER: '1'
         run: python -m pytest tests/test_win_secure.py tests/test_win_private.py tests/test_win_image_adapter.py tests/test_win_move.py tests/test_win_credentials.py tests/test_secure_stream.py -q
       - run: python scripts/build-engine.py
       - run: python -m pip install build pytest httpx websockets

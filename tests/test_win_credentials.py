@@ -190,6 +190,76 @@ def test_journal_malformado_e_recusado_sem_alterar_credencial(tmp_path):
     assert arquivo.read_bytes() == b'credencial-anterior' and journal.exists()
 
 
+@pytest.mark.skipif(os.environ.get('PASSE1_TEST_MULTIUSER') != '1', reason='requer runner Windows descartável')
+def test_outro_usuario_nao_pode_apagar_journal_e_burlar_bloqueio():
+    """Testa acesso real com conta local restrita e diretório compartilhado."""
+    import ctypes
+    import secrets
+    import sys
+    import tempfile
+    from ctypes import wintypes
+    from pathlib import Path
+
+    from passe1_engine import win_credentials
+
+    nome = 'p1' + secrets.token_hex(6)
+    senha = 'P1!' + secrets.token_urlsafe(24) + 'a9'
+    criado = False
+    publico = os.environ.get('PUBLIC')
+    if not publico:
+        raise RuntimeError('Diretório PUBLIC indisponível para teste multiusuário.')
+    try:
+        resultado = subprocess.run(['net', 'user', nome, senha, '/add'], capture_output=True, timeout=30, check=False)
+        if resultado.returncode:
+            raise RuntimeError(f'Não foi possível criar conta de teste; código {resultado.returncode}.')
+        criado = True
+        with tempfile.TemporaryDirectory(prefix='passe1-acl-', dir=publico) as pasta:
+            pasta = Path(pasta)
+            subprocess.run(['icacls', str(pasta), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+            arquivo = pasta / 'key'
+            win_credentials.gravar(arquivo, b'anterior')
+            programa = '''
+import os, sys
+from passe1_engine import win_credentials
+gravar = win_credentials._gravar_handle
+def interromper(kernel, handle, dados):
+    gravar(kernel, handle, b'parcial')
+    os._exit(91)
+win_credentials._gravar_handle = interromper
+win_credentials.gravar(sys.argv[1], b'novo')
+'''
+            resultado = subprocess.run([sys.executable, '-c', programa, str(arquivo)], capture_output=True, timeout=60, check=False)
+            assert resultado.returncode == 91
+            journal = arquivo.with_name(arquivo.name + '.passe1-cred-journal')
+            assert journal.exists()
+            advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+            kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+            advapi.LogonUserW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+            advapi.ImpersonateLoggedOnUser.argtypes = [wintypes.HANDLE]
+            kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+            token = wintypes.HANDLE()
+            if not advapi.LogonUserW(nome, '.', senha, 3, 0, ctypes.byref(token)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                if not advapi.ImpersonateLoggedOnUser(token):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    try:
+                        os.unlink(journal)
+                    except PermissionError:
+                        pass
+                finally:
+                    if not advapi.RevertToSelf():
+                        raise ctypes.WinError(ctypes.get_last_error())
+            finally:
+                kernel.CloseHandle(token)
+            with pytest.raises(win_credentials.RecoveryPendente):
+                win_credentials.ler(arquivo)
+    finally:
+        if criado:
+            subprocess.run(['net', 'user', nome, '/delete'], capture_output=True, timeout=30, check=False)
+
+
 def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch):
     import passe1
     from passe1_engine import launcher, win_credentials
