@@ -75,14 +75,36 @@ def buscar_candidatos(padrao, caminhos, ripgrep, limite=100):
             )
             def ler_saida():
                 try:
-                    for linha in processo.stdout:
-                        evento = json.loads(linha)
-                        if evento.get('type') != 'match' or len(locais) >= limite:
-                            continue
-                        dado = evento['data']
-                        texto = dado['lines'].get('text')
-                        if texto is not None:
-                            locais.append((nome, dado['line_number'], texto.rstrip('\r\n')))
+                    buffer = bytearray()
+                    excessivo = False
+                    while True:
+                        bloco = processo.stdout.read(65536)
+                        if not bloco:
+                            break
+                        partes = bloco.split(b'\n')
+                        for indice, parte in enumerate(partes):
+                            if not excessivo:
+                                if len(buffer) + len(parte) > 128 * 1024:
+                                    excessivo = True
+                                    buffer.clear()
+                                else:
+                                    buffer.extend(parte)
+                            if indice == len(partes) - 1:
+                                continue
+                            if excessivo:
+                                if not erros:
+                                    erros.append(ValueError('Registro de busca excede 128 KiB.'))
+                            elif buffer:
+                                evento = json.loads(buffer)
+                                if evento.get('type') == 'match' and len(locais) < limite:
+                                    dado = evento['data']
+                                    texto = dado['lines'].get('text')
+                                    if texto is not None:
+                                        locais.append((nome, dado['line_number'], texto.rstrip('\r\n')[:2000]))
+                            buffer.clear()
+                            excessivo = False
+                    if buffer or excessivo:
+                        erros.append(ValueError('Registro de busca incompleto ou excessivo.'))
                 except (OSError, ValueError, KeyError, TypeError) as exc:
                     erros.append(exc)
             leitor = threading.Thread(target=ler_saida, daemon=True)
@@ -107,7 +129,9 @@ def buscar_candidatos(padrao, caminhos, ripgrep, limite=100):
                 continue
             codigo = processo.wait()
             leitor.join()
-            if erros or codigo not in (0, 1):
+            if erros:
+                raise ValueError('Resultado de busca inválido ou excessivo.') from erros[0]
+            if codigo not in (0, 1):
                 raise ValueError('Ripgrep recusou a expressão de busca.')
             resultados.extend(locais[:limite - len(resultados)])
             if len(resultados) >= limite:

@@ -16,15 +16,16 @@ def transmitir(caminho, destino, tamanho_bloco=65536):
     if os.name == "nt":
         fd = _abrir_windows(alvo)
         try:
-            _transmitir_fd(fd, destino, tamanho_bloco)
+            arquivo = _transmitir_fd(fd, destino, tamanho_bloco)
+            return {'arquivo': [str(item) for item in arquivo], 'pais': None}
         finally:
             os.close(fd)
-        return
     raiz = Path(alvo.anchor)
-    with arquivos_seguros._pai(raiz, alvo) as (pai, nome, _):
+    with arquivos_seguros._pai(raiz, alvo) as (pai, nome, pais):
         fd, _ = arquivos_seguros._abrir_arquivo(pai, nome)
         try:
-            _transmitir_fd(fd, destino, tamanho_bloco)
+            arquivo = _transmitir_fd(fd, destino, tamanho_bloco)
+            return {'arquivo': [str(item) for item in arquivo], 'pais': [[str(valor) for valor in item] for item in pais]}
         finally:
             os.close(fd)
 
@@ -41,6 +42,7 @@ def _transmitir_fd(fd, destino, tamanho_bloco):
     arquivos_seguros._validar_arquivo(depois)
     if arquivos_seguros._estado(antes) != arquivos_seguros._estado(depois):
         raise ValueError("Arquivo mudou durante a leitura.")
+    return arquivos_seguros._estado(depois)
 
 
 def _abrir_windows(alvo):
@@ -80,6 +82,7 @@ def _abrir_windows(alvo):
 
 
 def _main():
+    import json
     import sys
     if len(sys.argv) != 2:
         print("Caminho de leitura ausente.", file=sys.stderr)
@@ -88,8 +91,9 @@ def _main():
         import msvcrt
         msvcrt.setmode(sys.stdout.fileno(), os.O_BINARY)
     try:
-        transmitir(sys.argv[1], sys.stdout.buffer)
+        versao = transmitir(sys.argv[1], sys.stdout.buffer)
         sys.stdout.buffer.flush()
+        print(json.dumps(versao), file=sys.stderr, flush=True)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"Leitura segura recusada: {exc}", file=sys.stderr)
         return 1

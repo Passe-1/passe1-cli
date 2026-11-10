@@ -125,3 +125,25 @@ def test_regex_invalida_no_fechamento_do_pipe_retorna_erro(tmp_path, monkeypatch
     monkeypatch.setattr(subprocess, 'Popen', Processo)
     with pytest.raises(ValueError, match='expressão'):
         secure_search.buscar_candidatos('[', [str(arquivo)], 'rg')
+
+
+def test_linha_gigante_retorna_erro_sem_expor_registro(tmp_path):
+    import shutil
+    ripgrep = shutil.which('rg')
+    if not ripgrep:
+        pytest.skip('ripgrep não disponível')
+    arquivo = tmp_path / 'gigante.txt'
+    arquivo.write_text('MATCH' + 'x' * 2_000_000)
+    with pytest.raises(ValueError, match='excessivo'):
+        secure_search.buscar_candidatos('MATCH', [str(arquivo)], ripgrep)
+
+
+def test_resultado_de_linha_longa_e_limitado(tmp_path):
+    import shutil
+    ripgrep = shutil.which('rg')
+    if not ripgrep:
+        pytest.skip('ripgrep não disponível')
+    arquivo = tmp_path / 'longo.txt'
+    arquivo.write_text('MATCH' + 'x' * 5000)
+    resultado = secure_search.buscar_candidatos('MATCH', [str(arquivo)], ripgrep)
+    assert len(resultado[0][2]) == 2000

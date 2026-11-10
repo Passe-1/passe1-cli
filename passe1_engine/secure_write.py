@@ -7,7 +7,7 @@ from pathlib import Path
 import arquivos_seguros
 
 
-def substituir(caminho, anterior, novo):
+def substituir(caminho, anterior, novo, identidade=None):
     alvo = Path(os.path.abspath(caminho))
     raiz = Path(alvo.anchor)
     if anterior is None:
@@ -16,18 +16,22 @@ def substituir(caminho, anterior, novo):
     texto, versao = arquivos_seguros.ler(raiz, alvo)
     if texto != anterior:
         raise ValueError("O arquivo mudou após a aprovação.")
+    if identidade is not None and ([str(item) for item in versao.arquivo] != identidade.get('arquivo') or [[str(valor) for valor in item] for item in versao.pais] != identidade.get('pais')):
+        raise ValueError("A identidade do arquivo mudou após a aprovação.")
     if not versao.arquivo[-1] & 0o222:
         raise PermissionError("Arquivo sem permissão de escrita.")
     arquivos_seguros.editar(raiz, alvo, versao, novo)
 
 
 
-def remover(caminho, anterior):
+def remover(caminho, anterior, identidade=None):
     alvo = Path(os.path.abspath(caminho))
     raiz = Path(alvo.anchor)
     texto, versao = arquivos_seguros.ler(raiz, alvo)
     if texto != anterior:
         raise ValueError("O arquivo mudou após a aprovação.")
+    if identidade is not None and ([str(item) for item in versao.arquivo] != identidade.get('arquivo') or [[str(valor) for valor in item] for item in versao.pais] != identidade.get('pais')):
+        raise ValueError("A identidade do arquivo mudou após a aprovação.")
     with arquivos_seguros._pai(raiz, alvo) as (pai, nome, pais):
         if pais != versao.pais:
             raise ValueError("Diretório mudou após a aprovação.")
@@ -49,16 +53,18 @@ def _main():
         dados = json.load(sys.stdin)
         if not isinstance(dados, dict) or not isinstance(dados.get('caminho'), str):
             raise ValueError('Dados inválidos para alteração.')
+        if dados.get('anterior') is not None and not isinstance(dados.get('identidade'), dict):
+            raise ValueError('Identidade aprovada ausente.')
         if dados.get('operacao') == 'remover':
             if not isinstance(dados.get('anterior'), str):
                 raise ValueError('Conteúdo anterior inválido.')
-            remover(dados['caminho'], dados['anterior'])
+            remover(dados['caminho'], dados['anterior'], dados.get('identidade'))
             return 0
         if not isinstance(dados.get('novo'), str):
             raise ValueError('Dados inválidos para alteração.')
         if dados.get('anterior') is not None and not isinstance(dados['anterior'], str):
             raise ValueError('Conteúdo anterior inválido.')
-        substituir(dados['caminho'], dados.get('anterior'), dados['novo'])
+        substituir(dados['caminho'], dados.get('anterior'), dados['novo'], dados.get('identidade'))
     except (OSError, ValueError, RuntimeError) as exc:
         print(f'Alteração segura recusada: {exc}', file=sys.stderr)
         return 1

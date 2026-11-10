@@ -51,7 +51,8 @@ class Gateway(BaseHTTPRequestHandler):
 def main():
     original = Path.cwd()
     with tempfile.TemporaryDirectory() as pasta:
-        raiz = Path(pasta)
+        raiz = Path(pasta) / 'projeto'
+        raiz.mkdir()
         (raiz / 'publico.txt').write_text('BUSCA_SEGURA_FIXTURE', encoding='utf-8')
         (raiz / '.env').write_text('SEGREDO_FIXTURE', encoding='utf-8')
         os.link(raiz / '.env', raiz / 'alias.txt')
@@ -59,7 +60,7 @@ def main():
         servidor = ThreadingHTTPServer(('127.0.0.1', 0), Gateway)
         threading.Thread(target=servidor.serve_forever, daemon=True).start()
         try:
-            os.environ['PASSE1_CONFIG_DIR'] = str(raiz / 'config')
+            os.environ['PASSE1_CONFIG_DIR'] = str(Path(pasta) / 'config')
             os.environ['PASSE1_BASE_URL'] = f'http://127.0.0.1:{servidor.server_port}/v1'
             import passe1
             from passe1_engine import launcher
@@ -73,7 +74,7 @@ def main():
             resultado = subprocess.run([capturado['binary'], 'run', '--pure', '--format', 'json', '-m', 'passe1/glm-5.3-flash', 'Procure BUSCA_SEGURA_FIXTURE.'], env=ambiente, capture_output=True, text=True, timeout=120)
             saida = json.dumps(Gateway.respostas, ensure_ascii=False)
             if resultado.returncode or 'BUSCA_CONCLUIDA' not in resultado.stdout or 'BUSCA_SEGURA_FIXTURE' not in saida or 'SEGREDO_FIXTURE' in saida:
-                raise SystemExit('Smoke do grep falhou: ' + resultado.stderr[-1000:] + ' ' + resultado.stdout[-1000:])
+                raise SystemExit('Smoke do grep falhou: ' + resultado.stderr[-1000:] + ' ' + resultado.stdout[-1000:] + ' retorno=' + saida[-1000:])
             print('Grep do wheel usou rg empacotado e não expôs arquivo sensível.')
         finally:
             servidor.shutdown()

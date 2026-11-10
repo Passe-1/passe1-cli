@@ -68,3 +68,17 @@ def test_remocao_nao_segue_ancestral_trocado(tmp_path):
     with pytest.raises(OSError):
         secure_write.remover(projeto / 'alvo', 'segredo')
     assert arquivo.read_text() == 'segredo'
+
+
+def test_recusa_substituicao_por_outro_inode_com_mesmo_conteudo(tmp_path):
+    import io
+    from passe1_engine import secure_stream
+    arquivo = tmp_path / 'arquivo'
+    arquivo.write_text('aprovado')
+    destino = io.BytesIO()
+    identidade = secure_stream.transmitir(arquivo, destino)
+    arquivo.rename(tmp_path / 'original')
+    arquivo.write_text('aprovado')
+    with pytest.raises(ValueError, match='identidade'):
+        secure_write.substituir(arquivo, 'aprovado', 'alterado', identidade)
+    assert arquivo.read_text() == 'aprovado'
