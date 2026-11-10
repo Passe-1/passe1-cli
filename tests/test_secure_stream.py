@@ -60,3 +60,11 @@ def test_troca_de_ancestral_durante_leitura_nao_redireciona_descritor(tmp_path):
     destino = Destino()
     secure_stream.transmitir(arquivo, destino, tamanho_bloco=1)
     assert destino.getvalue() == b'abcd'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='streams alternativos são específicos do Windows')
+def test_recusa_stream_alternativo(tmp_path):
+    arquivo = tmp_path / 'normal.txt'
+    arquivo.write_text('original', encoding='utf-8')
+    with pytest.raises(ValueError):
+        secure_stream.transmitir(str(arquivo) + ':oculto', io.BytesIO())

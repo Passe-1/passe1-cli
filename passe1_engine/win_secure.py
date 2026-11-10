@@ -29,7 +29,7 @@ def _operar(caminho, anterior, conteudo):
 
     alvo = Path(os.path.abspath(caminho))
     partes = alvo.parts
-    if not alvo.is_absolute() or len(partes) < 2 or any(p in (".", "..") for p in partes[1:]):
+    if not alvo.is_absolute() or len(partes) < 2 or any(p in (".", "..") or ":" in p or p.endswith((" ", ".")) for p in partes[1:]):
         raise ValueError("Caminho inválido.")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     ntdll = ctypes.WinDLL("ntdll")

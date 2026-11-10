@@ -49,6 +49,8 @@ def _abrir_windows(alvo):
     import msvcrt
     from ctypes import wintypes
 
+    if any(':' in parte or parte.endswith((' ', '.')) for parte in alvo.parts[1:]):
+        raise ValueError("Caminho Windows inválido ou contém stream alternativo.")
     fd = os.open(alvo, os.O_RDONLY | os.O_BINARY)
     try:
         info = os.fstat(fd)

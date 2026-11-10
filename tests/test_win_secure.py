@@ -99,3 +99,12 @@ def test_criacao_falha_remove_arquivo_incompleto(tmp_path):
     with pytest.raises(RuntimeError, match='falha simulada'):
         substituir(alvo, None, ConteudoInvalido())
     assert not alvo.exists()
+
+
+def test_recusa_stream_alternativo(tmp_path):
+    from passe1_engine.win_secure import substituir
+    alvo = tmp_path / 'normal.txt'
+    alvo.write_text('original', encoding='utf-8')
+    with pytest.raises((OSError, ValueError)):
+        substituir(str(alvo) + ':oculto', None, 'x')
+    assert alvo.read_text(encoding='utf-8') == 'original'
