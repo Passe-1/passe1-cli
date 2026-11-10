@@ -123,6 +123,6 @@ O gateway que serve o instalador mantém atualmente uma cópia do CLI. Alteraç�
 - `setup codex` pede `export PASSE1_API_KEY=$(cat ~/.config/passe1/key)` no
   terminal.
 
-A opção `--session` salva mensagens, saídas de ferramentas e imagens localmente em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. Esse histórico pode conter dados sensíveis; remova o arquivo da sessão quando não precisar mais. Sessões são vinculadas ao projeto, gateway, modelo e chave usados na criação. A retomada de sessões está disponível em macOS e Linux.
+Em macOS e Linux, `agent --session` salva mensagens, saídas e imagens em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. No Windows, o comando usa sessões do motor OpenCode, guardadas no estado isolado de `~/.config/passe1/opencode/`; elas não são compatíveis com as sessões do agente legado. O histórico pode conter dados sensíveis. Sessões nomeadas são vinculadas ao projeto, gateway, modelo e chave usados na criação.
 
-As operações seguras de arquivo exigem recursos POSIX; atualmente o comando `agent` não está disponível no Windows. O `chat` continua disponível. A revalidação reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.
+`agent --sandbox` permanece disponível somente no macOS. A verificação de links reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.

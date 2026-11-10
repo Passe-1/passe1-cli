@@ -65,6 +65,7 @@ def _catalogo(base, chave, padrao):
                 opcoes["tool_call"] = True
             if item.get("vision") is True or nome == "gemini-3.1-flash-lite":
                 opcoes["attachment"] = True
+                opcoes["modalities"] = {"input": ["text", "image"], "output": ["text"]}
             modelos[nome] = opcoes
     except (httpx.HTTPError, ValueError, TypeError, AttributeError):
         print("Não foi possível atualizar o catálogo; usando o modelo configurado.")
@@ -92,6 +93,9 @@ def _instrucoes():
 
 def iniciar(argv=None, *, agente=None):
     args = list(sys.argv[1:] if argv is None else argv)
+    if agente is not None and agente.sandbox:
+        print("O sandbox do agente legado está disponível apenas no macOS.")
+        return 1
     if args and args[0] in {"login", "status", "logout", "keys", "config", "models"}:
         return passe1.main(args)
     binario = Path(__file__).resolve().parent / "bin" / ("opencode.exe" if os.name == "nt" else "opencode")
@@ -111,15 +115,13 @@ def iniciar(argv=None, *, agente=None):
         return 1
     modelo = (agente.model if agente else None) or passe1._modelo_padrao()
     modelos = _catalogo(base, chave, modelo)
-    config = {"provider": {"passe1": {"npm": "@ai-sdk/openai-compatible", "name": "Passe1", "options": {"baseURL": base}, "models": modelos}}, "model": "passe1/" + modelo, "enabled_providers": ["passe1"], "permission": {"edit": "ask", "bash": "ask", "external_directory": "ask", "webfetch": "ask", "websearch": "ask", "read": {"*": "allow", "*.env*": "ask", "*.pem": "ask", "*.key": "ask", "*.p12": "ask", "*.pfx": "ask", "*.keystore": "ask", "*.ssh/*": "ask", "*.aws/*": "ask", "*.gnupg/*": "ask", "*.config/*": "ask", "*.npmrc": "ask", "*.pypirc": "ask", "*.netrc": "ask", "*.dockerconfigjson": "ask", "*credentials*": "ask", "*secrets*": "ask", "*secret.*": "ask", "*token*": "ask", "*private_key*": "ask", "*id_rsa*": "ask", "*id_ed25519*": "ask", "*id_ecdsa*": "ask", "*service-account*": "ask"}}, "instructions": _instrucoes()}
+    config = {"provider": {"passe1": {"npm": "@ai-sdk/openai-compatible", "name": "Passe1", "options": {"baseURL": base}, "models": modelos}}, "model": "passe1/" + modelo, "enabled_providers": ["passe1"], "permission": {"edit": "ask", "bash": "ask", "external_directory": "ask", "webfetch": "ask", "websearch": "ask", "passe1_sensitive_read": "ask", "read": {"*": "allow", "*.env*": "ask", "*.pem": "ask", "*.key": "ask", "*.p12": "ask", "*.pfx": "ask", "*.keystore": "ask", "*.ssh/*": "ask", "*.aws/*": "ask", "*.gnupg/*": "ask", "*.config/*": "ask", "*.npmrc": "ask", "*.pypirc": "ask", "*.netrc": "ask", "*.dockerconfigjson": "ask", "*credentials*": "ask", "*secrets*": "ask", "*secret.*": "ask", "*token*": "ask", "*private_key*": "ask", "*id_rsa*": "ask", "*id_ed25519*": "ask", "*id_ecdsa*": "ask", "*service-account*": "ask"}}, "instructions": _instrucoes()}
     _guardar_credencial(chave)
     raiz = _raiz()
     ambiente = {nome: valor for nome, valor in os.environ.items() if not nome.startswith("OPENCODE_") and nome != "PASSE1_API_KEY"}
+    ambiente["PWD"] = str(Path.cwd().resolve())
     ambiente.update({"OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1", "XDG_CONFIG_HOME": str(raiz / "config"), "XDG_DATA_HOME": str(raiz / "data"), "XDG_STATE_HOME": str(raiz / "state"), "XDG_CACHE_HOME": str(raiz / "cache")})
     if agente is not None:
-        if agente.sandbox:
-            print("O sandbox do agente legado está disponível apenas no macOS.")
-            return 1
         passe1._imagens(agente.image or [])
         comando = [str(binario), "run", "--pure", "-m", "passe1/" + modelo]
         if agente.session:
@@ -130,7 +132,7 @@ def iniciar(argv=None, *, agente=None):
             titulo = "Passe1:" + agente.session + ":" + identificador
             try:
                 listado = subprocess.run([str(binario), "session", "list", "--format", "json", "--pure"], env=ambiente, capture_output=True, text=True, timeout=30, check=True)
-                sessoes = json.loads(listado.stdout)
+                sessoes = json.loads(listado.stdout) if listado.stdout.strip() else []
                 if not isinstance(sessoes, list):
                     raise TypeError("lista inválida")
                 diretorio = os.path.normcase(os.path.normpath(str(Path.cwd().resolve())))
@@ -147,11 +149,11 @@ def iniciar(argv=None, *, agente=None):
             except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
                 print("Não foi possível localizar a sessão com segurança.")
                 return 1
+        comando.extend(agente.tarefa)
         for imagem in agente.image or []:
-            comando += ["--file", imagem]
+            comando += ["--file", str(Path(imagem).resolve(strict=True))]
         if not agente.tarefa:
             comando.append("--interactive")
-        comando.extend(agente.tarefa)
         return os.execvpe(str(binario), comando, ambiente)
     return os.execvpe(str(binario), [str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
 

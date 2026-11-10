@@ -8,10 +8,12 @@ import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 
 class Gateway(BaseHTTPRequestHandler):
     autorizada = False
+    requisicoes: ClassVar[list] = []
 
     def log_message(self, *_args):
         pass
@@ -20,11 +22,15 @@ class Gateway(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(json.dumps({"data": [{"id": "glm-5.3-flash", "tipo": "chat"}]}).encode())
+        self.wfile.write(json.dumps({"data": [{"id": "glm-5.3-flash", "tipo": "chat", "vision": True}]}).encode())
 
     def do_POST(self):
         type(self).autorizada = self.headers.get("Authorization") == "Bearer sk-passe1-fixture"
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        dados_entrada = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        try:
+            type(self).requisicoes.append(json.loads(dados_entrada))
+        except ValueError:
+            pass
         eventos = [
             {"id": "test", "object": "chat.completion.chunk", "model": "glm-5.3-flash", "choices": [{"index": 0, "delta": {"role": "assistant", "content": "PASSE1_TUI_SUCESSO"}, "finish_reason": None}]},
             {"id": "test", "object": "chat.completion.chunk", "model": "glm-5.3-flash", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},

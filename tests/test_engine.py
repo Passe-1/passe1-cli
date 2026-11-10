@@ -24,6 +24,7 @@ def test_interface_configurada_sem_expor_chave(tmp_path, monkeypatch, capsys):
     assert config['enabled_providers'] == ['passe1']
     assert config['permission']['edit'] == config['permission']['bash'] == 'ask'
     assert config['permission']['webfetch'] == config['permission']['websearch'] == 'ask'
+    assert config['permission']['passe1_sensitive_read'] == 'ask'
     assert config['permission']['read']['*.env*'] == 'ask'
     assert config['permission']['read']['*id_rsa*'] == 'ask'
     assert config['permission']['read']['*service-account*'] == 'ask'
@@ -134,7 +135,7 @@ def test_agente_legado_com_imagem_e_sessao_cria_titulo_no_motor(tmp_path, monkey
         launcher.iniciar([], agente=args)
     assert '--title' in capturado['args']
     assert capturado['args'][capturado['args'].index('--file') + 1] == str(imagem)
-    assert capturado['args'][-1] == 'analise'
+    assert capturado['args'].index('analise') < capturado['args'].index('--file')
 
 
 def test_agente_legado_recusa_sandbox_nao_suportado(tmp_path, capsys):

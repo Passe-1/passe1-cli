@@ -28,7 +28,7 @@ index 3f89a639..9ce5e5db 100644
          switch (change.type) {
            case "add":
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index a92e4720..93a8f811 100644
+index a92e4720..ebe3a05a 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
 @@ -16,6 +16,7 @@ import { Format } from "../format"
@@ -43,7 +43,7 @@ index a92e4720..93a8f811 100644
              ? params.filePath
              : path.join(instance.directory, params.filePath)
            yield* assertExternalDirectoryEffect(ctx, filePath)
-+          yield* verificar(afs, filePath)
++          yield* verificar(afs, filePath).pipe(Effect.orDie)
  
            let diff = ""
            let contentOld = ""
@@ -64,40 +64,25 @@ index a92e4720..93a8f811 100644
                if (yield* format.file(filePath)) {
                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 6ea67124..ed6c2983 100644
+index 6ea67124..ad0cf394 100644
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
-@@ -1,5 +1,5 @@
- import path from "path"
--import { Effect, Schema } from "effect"
-+import { Effect, Option, Schema } from "effect"
- import { InstanceState } from "@/effect/instance-state"
+@@ -4,6 +4,7 @@ import { InstanceState } from "@/effect/instance-state"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { Ripgrep } from "@opencode-ai/core/ripgrep"
-@@ -7,6 +7,15 @@ import { assertExternalDirectoryEffect } from "./external-directory"
+ import { assertExternalDirectoryEffect } from "./external-directory"
++import { sensitive, verificar } from "./hardlink"
  import DESCRIPTION from "./grep.txt"
  import * as Tool from "./tool"
  
-+function sensitive(filepath: string) {
-+  const parts = filepath.toLowerCase().split(/[\\/]+/)
-+  const name = parts.at(-1) ?? ""
-+  return parts.some((part) => [".ssh", ".aws", ".gnupg", ".config"].includes(part)) ||
-+    [".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".dockerconfigjson", "credentials", "token", "secrets"].includes(name) ||
-+    [".env.", "credentials.", "secrets.", "secret.", "token.", "private_key", "id_rsa", "id_ed25519", "id_ecdsa", "service-account"].some((prefix) => name.startsWith(prefix)) ||
-+    [".env", ".pem", ".key", ".p12", ".pfx", ".keystore"].some((suffix) => name.endsWith(suffix))
-+}
-+
- export const Parameters = Schema.Struct({
-   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
-   path: Schema.optional(Schema.String).annotate({
-@@ -79,10 +88,16 @@ export const GrepTool = Tool.define(
+@@ -79,10 +80,16 @@ export const GrepTool = Tool.define(
  
            const limit = 100
            const truncated = rows.length === limit
 -          const final = rows
 +          const checked = yield* Effect.forEach(rows, (match) =>
-+            fs.stat(match.path).pipe(
-+              Effect.map((stat) => !sensitive(match.path) && stat.type === "File" && Option.isSome(stat.nlink) && stat.nlink.value === 1 ? match : undefined),
++            sensitive(match.path) ? Effect.succeed(undefined) : verificar(fs, match.path).pipe(
++              Effect.as(match),
 +              Effect.catch(() => Effect.succeed(undefined)),
 +            ),
 +          )
@@ -111,35 +96,88 @@ index 6ea67124..ed6c2983 100644
  
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..406b9e85
+index 00000000..e8c09342
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,15 @@
+@@ -0,0 +1,45 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
++import fs from "fs/promises"
++import path from "path"
 +
-+// A hard link can point to an inode also reachable outside the project.
-+export const verificar = Effect.fn("Passe1.verificarHardlink")(function* (fs: FSUtil.Interface, file: string) {
-+  const info = yield* fs.stat(file).pipe(
++// Refuse links whose target can escape the project or share an inode.
++export const verificar = Effect.fn("Passe1.verificarLinks")(function* (filesystem: FSUtil.Interface, file: string) {
++  const alvo = path.resolve(file)
++  const raiz = path.parse(alvo).root
++  const partes = alvo.slice(raiz.length).split(/[\\/]+/).filter(Boolean)
++  yield* Effect.tryPromise({
++    try: async () => {
++      let atual = raiz
++      for (const parte of partes) {
++        atual = path.join(atual, parte)
++        try {
++          if ((await fs.lstat(atual)).isSymbolicLink()) throw new Error("Caminho contém link simbólico.")
++        } catch (error) {
++          if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") break
++          throw error
++        }
++      }
++    },
++    catch: (error) => error instanceof Error ? error : new Error("Não foi possível verificar os links."),
++  })
++  const info = yield* filesystem.stat(file).pipe(
 +    Effect.catchIf(
 +      (error) => "reason" in error && error.reason._tag === "NotFound",
 +      () => Effect.succeed(undefined),
 +    ),
 +  )
 +  if (info?.type === "File" && (Option.isNone(info.nlink) || info.nlink.value !== 1)) {
-+    throw new Error("Arquivo possui múltiplos links ou não é possível verificá-los.")
++    return yield* Effect.fail(new Error("Arquivo possui múltiplos links ou não é possível verificá-los."))
 +  }
 +})
++
++
++export function sensitive(filepath: string) {
++  const parts = filepath.toLowerCase().split(/[\\/]+/)
++  const name = parts.at(-1) ?? ""
++  return parts.some((part) => [".ssh", ".aws", ".gnupg", ".config"].includes(part)) ||
++    [".env", ".envrc", ".npmrc", ".pypirc", ".netrc", ".dockerconfigjson", "credentials", "token", "secrets"].includes(name) ||
++    [".env.", "credentials.", "secrets.", "secret.", "token.", "private_key", "id_rsa", "id_ed25519", "id_ecdsa", "service-account"].some((prefix) => name.startsWith(prefix)) ||
++    [".env", ".pem", ".key", ".p12", ".pfx", ".keystore"].some((suffix) => name.endsWith(suffix))
++}
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 678ed445..1494bf0b 100644
+index 678ed445..447fe219 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
-@@ -260,6 +260,9 @@ export const ReadTool = Tool.define<
+@@ -7,6 +7,7 @@ import { LSP } from "@/lsp/lsp"
+ import DESCRIPTION from "./read.txt"
+ import { InstanceState } from "@/effect/instance-state"
+ import { assertExternalDirectoryEffect } from "./external-directory"
++import { sensitive, verificar } from "./hardlink"
+ import { Instruction } from "../session/instruction"
+ import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
+ 
+@@ -236,6 +237,8 @@ export const ReadTool = Tool.define<
+         filepath = path.resolve(instance.directory, filepath)
+       }
+       if (process.platform === "win32") {
++        const root = path.parse(filepath).root
++        if (root === "\\" || root === "/") filepath = path.resolve(instance.directory, filepath)
+         filepath = FSUtil.normalizePath(filepath)
+       }
+       const title = path.relative(instance.worktree, filepath)
+@@ -260,6 +263,15 @@ export const ReadTool = Tool.define<
        })
  
        if (!stat) return yield* miss(filepath)
-+      if (stat.type === "File" && (Option.isNone(stat.nlink) || stat.nlink.value !== 1)) {
-+        throw new Error("Arquivo possui múltiplos links ou não é possível verificá-los.")
++      yield* verificar(fs, filepath)
++      if (stat.type === "File" && sensitive(filepath)) {
++        yield* ctx.ask({
++          permission: "passe1_sensitive_read",
++          patterns: [path.relative(instance.worktree, filepath)],
++          always: [],
++          metadata: { filepath },
++        })
 +      }
  
        if (stat.type === "Directory") {
@@ -218,7 +256,7 @@ index 46155a50..30e1c05d 100644
      it.instance("creates new file when oldString is empty", () =>
        Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 13858f9f..2a253a97 100644
+index 13858f9f..29c477e1 100644
 --- a/packages/opencode/test/tool/grep.test.ts
 +++ b/packages/opencode/test/tool/grep.test.ts
 @@ -77,6 +77,19 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
@@ -241,8 +279,30 @@ index 13858f9f..2a253a97 100644
    rooted.live("basic search", () =>
      Effect.gen(function* () {
        const info = yield* GrepTool
+@@ -170,7 +183,7 @@ describe("tool.grep", () => {
+     }),
+   )
+ 
+-  it.instance("does not ask for external_directory when alias path is allowed", () =>
++  it.instance("recusa resultado através de diretório simbólico", () =>
+     Effect.gen(function* () {
+       if (process.platform === "win32") return
+ 
+@@ -214,10 +227,9 @@ describe("tool.grep", () => {
+         next,
+       )
+ 
+-      expect(result.metadata.matches).toBe(1)
+-      expect(result.output).toContain(path.join(alias, "test.txt"))
++      expect(result.metadata.matches).toBe(0)
++      expect(result.output).not.toContain("needle")
+       expect(result.output).not.toContain(path.join(real, "test.txt"))
+-      expect(requests.find((req) => req.permission === "external_directory")).toBeUndefined()
+     }),
+   )
+ })
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index c1ef61b2..b8aeeba8 100644
+index c1ef61b2..a8e4933c 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
@@ -253,11 +313,34 @@ index c1ef61b2..b8aeeba8 100644
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -312,6 +313,18 @@ describe("tool.read env file permissions", () => {
+@@ -312,6 +313,41 @@ describe("tool.read env file permissions", () => {
    }
  })
  
 +describe("Passe1 hard links", () => {
++  it.instance("solicita aprovação para nome sensível em maiúsculas", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const arquivo = path.join(test.directory, "SEGREDO.PEM")
++      yield* Effect.promise(() => Bun.write(arquivo, "fixture"))
++      const { items, next } = asks()
++      yield* exec(test.directory, { filePath: arquivo }, next)
++      expect(items.some((item) => item.permission === "passe1_sensitive_read")).toBe(true)
++    }),
++  )
++
++  it.instance("recusa link simbólico para arquivo", () =>
++    Effect.gen(function* () {
++      const test = yield* TestInstance
++      const original = path.join(test.directory, "original.txt")
++      const alias = path.join(test.directory, "alias.txt")
++      yield* Effect.promise(() => Bun.write(original, "segredo-fixture"))
++      yield* Effect.promise(() => fs.symlink(original, alias))
++      const erro = yield* fail(test.directory, { filePath: alias })
++      expect(erro.message).toContain("link simbólico")
++    }),
++  )
++
 +  it.instance("recusa leitura de alias com hard link", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const segredo = path.join(test.directory, ".env")
@@ -273,7 +356,7 @@ index c1ef61b2..b8aeeba8 100644
    it.instance("truncates large file by bytes and sets truncated metadata", () =>
      Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index 4f897dc8..b2ff786e 100644
+index 4f897dc8..0e2c55cb 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
 @@ -1,6 +1,6 @@
@@ -284,10 +367,22 @@ index 4f897dc8..b2ff786e 100644
  import path from "path"
  import fs from "fs/promises"
  import { WriteTool } from "../../src/tool/write"
-@@ -59,6 +59,17 @@ const run = Effect.fn("WriteToolTest.run")(function* (
+@@ -59,6 +59,29 @@ const run = Effect.fn("WriteToolTest.run")(function* (
  })
  
  describe("tool.write", () => {
++  it.instance("recusa troca por link simbólico durante aprovação", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const original = path.join(test.directory, "alvo.txt")
++    const externo = path.join(test.directory, "externo.txt")
++    yield* Effect.promise(() => Bun.write(original, "antes"))
++    yield* Effect.promise(() => Bun.write(externo, "preservado"))
++    const alterada = { ...ctx, ask: () => Effect.promise(async () => { await fs.unlink(original); await fs.symlink(externo, original) }) }
++    const resultado = yield* run({ filePath: original, content: "alterado" }, alterada).pipe(Effect.exit)
++    expect(Exit.isFailure(resultado)).toBe(true)
++    expect(yield* Effect.promise(() => fs.readFile(externo, "utf8"))).toBe("preservado")
++  }))
++
 +  it.instance("não altera arquivo com hard link", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const original = path.join(test.directory, "original.txt")
