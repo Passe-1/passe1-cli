@@ -15,9 +15,12 @@ from urllib.parse import quote
 
 import httpx
 from prompt_toolkit.application import Application
+from prompt_toolkit.completion import Completer, Completion, PathCompleter
 from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import HSplit, Layout, Window
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.styles import Style
@@ -84,12 +87,34 @@ def _servidor(binario, ambiente):
         raise
 
 
+class ComposerCompleter(Completer):
+    comandos = ('/ajuda', '/anexar', '/imagem', '/anexos', '/remover', '/limpar', '/sair')
+
+    def get_completions(self, document, complete_event):
+        texto = document.text_before_cursor
+        if texto.startswith('/') and ' ' not in texto:
+            for comando in self.comandos:
+                if comando.startswith(texto):
+                    yield Completion(comando, start_position=-len(texto))
+            return
+        prefixo = next((x for x in ('/anexar ', '/imagem ') if texto.startswith(x)), None)
+        caminho = texto[len(prefixo):] if prefixo else None
+        if caminho is not None:
+            yield from PathCompleter(expanduser=True).get_completions(Document(caminho), complete_event)
+
+
 class Interface:
     def __init__(self, cliente, modelo, sessao, imagens):
         self.cliente = cliente
         self.modelo = modelo
         self.sessao = sessao
         self.imagens = imagens
+        self.anexos = []
+        self.anexo_pendente = None
+        self.preparando_anexo = False
+        self.historico = []
+        self.indice_historico = 0
+        self.rascunho = ""
         self.linhas = []
         self.partes = {}
         self.papeis = {}
@@ -103,16 +128,45 @@ class Interface:
         self._largura_transcricao = None
         self._seguindo = True
         self.transcricao = TextArea(text='', read_only=True, scrollbar=False, wrap_lines=True, focusable=False, height=lambda: min(18, max(3, self.transcricao.text.count('\n') + 2)))
-        self.entrada = TextArea(height=lambda: min(6, max(1, self.entrada.text.count('\n') + 1)), multiline=True, prompt='❯ ', wrap_lines=True, style='class:entrada')
+        self.entrada = TextArea(height=lambda: min(6, max(1, self.entrada.text.count('\n') + 1)), multiline=True, prompt='❯ ', wrap_lines=True, style='class:entrada', history=InMemoryHistory(), completer=ComposerCompleter(), complete_while_typing=False)
         teclas = KeyBindings()
 
         @teclas.add('enter')
         def enviar(event):
+            if self.preparando_anexo:
+                self._adicionar('\nAguarde a preparação do anexo antes de enviar.\n')
+                return
+            if self.entrada.text.endswith('\\'):
+                self.entrada.buffer.delete_before_cursor(count=1)
+                self.entrada.buffer.insert_text('\n')
+                return
             texto = self.entrada.text.strip()
-            self.entrada.text = ''
+            if texto and (not self.historico or self.historico[-1] != texto):
+                self.historico.append(texto)
+            self.indice_historico = len(self.historico)
+            self.entrada.buffer.append_to_history()
+            self.entrada.buffer.reset()
             if texto:
                 event.app.create_background_task(self.enviar(texto))
 
+        @teclas.add(Keys.BracketedPaste)
+        def colar(event):
+            from passe1_engine.attachments import extrair_caminhos
+            caminhos = extrair_caminhos(event.data)
+            if caminhos and not self.ocupado and not self.interacoes and not self.preparando_anexo:
+                self.preparando_anexo = True
+                event.app.create_background_task(self._colar_caminhos(caminhos))
+            else:
+                event.current_buffer.insert_text(event.data.replace('\r\n', '\n').replace('\r', '\n'))
+
+        @teclas.add('c-v')
+        @teclas.add('escape', 'v')
+        def clipboard(event):
+            if not self.preparando_anexo:
+                self.preparando_anexo = True
+                event.app.create_background_task(self.colar_clipboard())
+
+        @teclas.add('c-j')
         @teclas.add('c-o')
         def nova_linha(event):
             self.entrada.buffer.insert_text('\n')
@@ -123,6 +177,27 @@ class Interface:
                 event.app.create_background_task(self.abortar())
             else:
                 event.app.exit()
+
+        @teclas.add('up', eager=True)
+        def anterior(event):
+            buffer = event.current_buffer
+            if buffer.document.cursor_position_row > 0 or buffer.complete_state:
+                buffer.auto_up()
+            elif self.indice_historico > 0:
+                if self.indice_historico == len(self.historico):
+                    self.rascunho = buffer.text
+                self.indice_historico -= 1
+                buffer.set_document(Document(self.historico[self.indice_historico], cursor_position=0))
+
+        @teclas.add('down', eager=True)
+        def proximo(event):
+            buffer = event.current_buffer
+            if buffer.document.cursor_position_row < buffer.document.line_count - 1 or buffer.complete_state:
+                buffer.auto_down()
+            elif self.indice_historico < len(self.historico):
+                self.indice_historico += 1
+                texto = self.rascunho if self.indice_historico == len(self.historico) else self.historico[self.indice_historico]
+                buffer.set_document(Document(texto, cursor_position=len(texto)))
 
         @teclas.add('pageup')
         def subir(event):
@@ -175,10 +250,15 @@ class Interface:
         self._ocupado = valor
 
     def _atividade(self):
+        if self.preparando_anexo:
+            return FormattedText([('class:atividade', 'Preparando anexo · aguarde antes de enviar')])
+        if self.anexo_pendente:
+            return FormattedText([('class:atividade', 'Arquivo sensível · confirme ou cancele o envio')])
         if self.interacoes:
             return FormattedText([('class:atividade', '◆ Aguardando sua confirmação')])
         if not self.ocupado:
-            return FormattedText([('', '')])
+            quantidade = len(self.imagens) + len(self.anexos)
+            return FormattedText([('class:subtitulo', f'{quantidade} anexo(s) pendente(s) · /anexos revisar · /remover N' if quantidade else '')])
         decorrido = max(0, time.monotonic() - self._inicio_atividade)
         quadros = ('·', '✦', '✧', '✦')
         quadro = quadros[int(decorrido * 8) % len(quadros)]
@@ -264,11 +344,15 @@ class Interface:
             self._adicionar('\nNão foi possível interromper a execução.\n')
 
     async def enviar(self, texto):
+        if self.preparando_anexo:
+            self.entrada.buffer.insert_text(texto)
+            self._adicionar('\nAguarde a preparação do anexo antes de enviar.\n')
+            return
         if texto in {'/sair', '/exit'}:
             self.app.exit()
             return
         if texto == '/ajuda':
-            self._adicionar('\n/ajuda  comandos · /imagem CAMINHO  anexar imagem · /limpar  limpar tela · /sair  sair\nCtrl+O insere nova linha. Esc ou Ctrl+C interrompe a execução.\n')
+            self._adicionar('\n/ajuda  comandos · /imagem CAMINHO  anexar imagem · /anexar CAMINHO  anexar arquivo · /anexos  revisar · /remover N  remover · /limpar  limpar tela · /sair  sair\nCtrl+O insere nova linha. Esc ou Ctrl+C interrompe a execução.\n')
             return
         if texto == '/limpar':
             self.linhas.clear()
@@ -293,6 +377,47 @@ class Interface:
         if self.ocupado:
             self._adicionar('\nAguarde a resposta ou pressione Esc para interromper.\n')
             return
+        if self.anexo_pendente:
+            token, caminho, pendente = self.anexo_pendente
+            if texto == f'/confirmar-anexo {token}':
+                try:
+                    anexo = pendente.confirmar()
+                    if self._tamanho_anexos() + anexo.tamanho > 4 * 1024 * 1024:
+                        raise ValueError('Anexos ultrapassam o limite total de 4 MiB.')
+                    self.anexos.append(anexo)
+                    self._adicionar(f'\nAnexo confirmado: {anexo.nome}.\n')
+                except (ValueError, OSError) as erro:
+                    self._adicionar(f'\nAnexo recusado: {erro}\n')
+                finally:
+                    pendente.fechar()
+                    self.anexo_pendente = None
+            elif texto == '/cancelar-anexo':
+                pendente.fechar()
+                self.anexo_pendente = None
+                self._adicionar('\nAnexo sensível descartado.\n')
+            else:
+                self._adicionar(f'\nConfirme envio do arquivo {caminho}: /confirmar-anexo {token}, ou /cancelar-anexo.\n')
+            return
+        if texto == '/anexos':
+            itens = [parte.get('filename', 'imagem') for parte in self.imagens] + [anexo.nome for anexo in self.anexos]
+            self._adicionar('\n' + ('\n'.join(f'{i + 1}. {nome}' for i, nome in enumerate(itens)) if itens else 'Nenhum anexo pendente.') + '\n')
+            return
+        if texto.startswith('/remover '):
+            try:
+                indice = int(texto.split(' ', 1)[1]) - 1
+                if indice < 0 or indice >= len(self.imagens) + len(self.anexos):
+                    raise ValueError
+                if indice < len(self.imagens):
+                    self.imagens.pop(indice)
+                else:
+                    self.anexos.pop(indice - len(self.imagens))
+                self._adicionar('\nAnexo removido.\n')
+            except ValueError:
+                self._adicionar('\nUse /anexos e /remover N com um número válido.\n')
+            return
+        if texto.startswith('/anexar '):
+            await self.anexar(texto[len('/anexar '):])
+            return
         if texto == '/imagem' or texto.startswith('/imagem '):
             caminho = texto[len('/imagem'):].strip()
             if len(caminho) >= 2 and caminho[0] == caminho[-1] and caminho[0] in "\"'":
@@ -306,7 +431,7 @@ class Interface:
                 url = partes[0]['image_url']['url']
                 tamanhos = [len(base64.b64decode(item['url'].split(',', 1)[1], validate=True)) for item in self.imagens]
                 tamanho = len(base64.b64decode(url.split(',', 1)[1], validate=True))
-                if sum(tamanhos) + tamanho > 4 * 1024 * 1024:
+                if sum(tamanhos) + sum(x.tamanho for x in self.anexos) + tamanho > 4 * 1024 * 1024:
                     raise ValueError('As imagens ultrapassam o limite total de 4 MiB.')
                 self.imagens.append({'type': 'file', 'mime': url.split(';', 1)[0].removeprefix('data:'), 'filename': Path(caminho).name, 'url': url})
                 self._adicionar(f'\nImagem anexada: {Path(caminho).name}. Será enviada com a próxima mensagem.\n')
@@ -318,17 +443,90 @@ class Interface:
         self._adicionar(f'\nVocê  ›  {texto}\n\nPasse1  ›  ')
         partes = [{'type': 'text', 'text': texto}]
         partes.extend(self.imagens)
+        partes.extend(anexo.parte for anexo in self.anexos)
         try:
             resposta = await self.cliente.post(f'/session/{self.sessao}/prompt_async', json={
                 'model': {'providerID': 'passe1', 'modelID': self.modelo}, 'parts': partes,
             })
             resposta.raise_for_status()
             self.imagens = []
+            self.anexos = []
         except httpx.HTTPError:
             self.ocupado = False
             self.estado = 'Erro'
             self._adicionar('\nNão foi possível enviar a mensagem ao motor.\n')
         self.app.invalidate()
+
+    def _tamanho_anexos(self):
+        return sum(x.tamanho for x in self.anexos) + sum(len(base64.b64decode(x['url'].split(',', 1)[1], validate=True)) for x in self.imagens)
+
+    async def _colar_caminhos(self, caminhos):
+        try:
+            for caminho in caminhos:
+                await self.anexar(caminho)
+                if self.anexo_pendente:
+                    break
+        finally:
+            self.preparando_anexo = False
+
+    async def colar(self, texto):
+        from passe1_engine.attachments import extrair_caminhos
+        caminhos = extrair_caminhos(texto)
+        if caminhos and not self.ocupado and not self.interacoes:
+            for caminho in caminhos:
+                await self.anexar(caminho)
+                if self.anexo_pendente:
+                    break
+        else:
+            self.entrada.buffer.insert_text(texto.replace('\r\n', '\n').replace('\r', '\n'))
+
+    async def colar_clipboard(self):
+        if self.ocupado or self.interacoes or self.anexo_pendente:
+            self.preparando_anexo = False
+            self._adicionar('\nConclua a interação atual antes de anexar.\n')
+            return
+        from passe1_engine.attachments import ler_clipboard
+        self.preparando_anexo = True
+        try:
+            anexo = await asyncio.to_thread(ler_clipboard)
+            if anexo is None:
+                self._adicionar('\nNenhuma imagem disponível. Cole texto com o atalho do terminal ou use /anexar CAMINHO.\n')
+                return
+            if self._tamanho_anexos() + anexo.tamanho > 4 * 1024 * 1024:
+                raise ValueError('Anexos ultrapassam o limite total de 4 MiB.')
+            self.anexos.append(anexo)
+            self._adicionar('\nImagem da área de transferência anexada. /anexos para revisar.\n')
+        except (ValueError, OSError) as erro:
+            self._adicionar(f'\nNão foi possível colar imagem: {erro}\n')
+        finally:
+            self.preparando_anexo = False
+
+    async def anexar(self, caminho):
+        if self.anexo_pendente:
+            self._adicionar('\nConfirme ou cancele o anexo sensível pendente antes de continuar.\n')
+            return
+        from passe1_engine.attachments import (
+            ConsentimentoNecessario,
+            preparar,
+            preparar_pendente,
+        )
+        try:
+            if len(caminho) >= 2 and caminho[0] == caminho[-1] and caminho[0] in '"\'':
+                caminho = caminho[1:-1]
+            try:
+                anexo = preparar(caminho)
+            except ConsentimentoNecessario:
+                pendente = preparar_pendente(caminho)
+                token = secrets.token_hex(2)
+                self.anexo_pendente = (token, caminho, pendente)
+                self._adicionar(f'\nArquivo potencialmente sensível: {caminho}\nEnviar esse conteúdo ao modelo? Digite /confirmar-anexo {token}, ou /cancelar-anexo.\n')
+                return
+            if self._tamanho_anexos() + anexo.tamanho > 4 * 1024 * 1024:
+                raise ValueError('Anexos ultrapassam o limite total de 4 MiB.')
+            self.anexos.append(anexo)
+            self._adicionar(f'\nAnexo preparado: {anexo.nome}. /anexos para revisar.\n')
+        except (ValueError, OSError) as erro:
+            self._adicionar(f'\nNão foi possível anexar: {erro}\n')
 
     async def responder_permissao(self, texto):
         respostas = {'s': 'once', 'sim': 'once', 'n': 'reject', 'não': 'reject', 'nao': 'reject'}
@@ -514,6 +712,9 @@ async def _executar(url, segredo, modelo, sessao, imagens, tarefa):
                     await interface.enviar(tarefa)
                 await interface.app.run_async()
             finally:
+                if getattr(interface, 'anexo_pendente', None):
+                    interface.anexo_pendente[2].fechar()
+                    interface.anexo_pendente = None
                 if interface.ocupado:
                     await interface.abortar()
                 tarefa_eventos.cancel()

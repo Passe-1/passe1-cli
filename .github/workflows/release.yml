@@ -74,6 +74,8 @@ jobs:
         run: python -m pytest tests/test_win_image_wheel.py -q
       - if: ${{ !cancelled() && (steps.pexpect_ready.outcome == 'success' || steps.winpty_ready.outcome == 'success') }}
         run: python scripts/smoke-tui.py
+      - if: ${{ !cancelled() && (steps.pexpect_ready.outcome == 'success' || steps.winpty_ready.outcome == 'success') }}
+        run: python -I scripts/smoke-composer.py
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-${{ matrix.os }}
