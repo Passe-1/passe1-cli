@@ -132,16 +132,17 @@ def test_agente_legado_com_imagem_e_sessao_cria_titulo_no_motor(tmp_path, monkey
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
          patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '[]', '')), \
-         patch.object(launcher.os, 'execvpe', side_effect=lambda b, a, e: capturado.update(args=a)):
+         patch.object(launcher, '_supervision', side_effect=lambda a, env: capturado.update(args=a, imagem=Path(a[a.index('--file') + 1]).read_bytes()) or 0):
         launcher.iniciar([], agente=args)
     assert '--title' in capturado['args']
-    assert capturado['args'][capturado['args'].index('--file') + 1] == str(imagem)
+    assert capturado['imagem'] == imagem.read_bytes()
     assert capturado['args'].index('analise') < capturado['args'].index('--file')
 
 
-def test_agente_legado_recusa_sandbox_nao_suportado(tmp_path, capsys):
+def test_agente_legado_recusa_sandbox_nao_suportado(tmp_path, capsys, monkeypatch):
     import argparse
     args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=True, image=None, tarefa=['teste'])
+    monkeypatch.setattr(launcher.sys, 'platform', 'linux')
     with patch.object(launcher.Path, 'is_file', return_value=True), \
          patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
@@ -160,3 +161,151 @@ def test_instrucoes_recusa_hardlink_para_segredo(tmp_path, monkeypatch):
     os.link(segredo, tmp_path / 'AGENTS.md')
     monkeypatch.chdir(tmp_path)
     assert launcher._instrucoes() == []
+
+
+def test_agent_modelo_em_terminal_usa_tui_completa(monkeypatch):
+    import passe1
+    monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    with patch.object(launcher, 'iniciar', return_value=0) as iniciar:
+        assert passe1.main(['agent', '--model', 'modelo']) == 0
+        assert iniciar.call_args.kwargs['tui'] is True
+        assert iniciar.call_args.kwargs['agente'].model == 'modelo'
+
+
+def test_agent_sandbox_em_terminal_usa_tui_completa(monkeypatch):
+    import passe1
+    monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    with patch.object(launcher, 'iniciar', return_value=0) as iniciar:
+        assert passe1.main(['agent', '--sandbox']) == 0
+        assert iniciar.call_args.kwargs['tui'] is True
+        assert iniciar.call_args.kwargs['agente'].sandbox is True
+
+
+def test_tui_completa_inicia_sessao_e_prepara_imagem(tmp_path, monkeypatch):
+    import argparse
+    import subprocess
+    imagem = tmp_path / 'imagem.png'
+    imagem.write_bytes(b'\x89PNG\r\n\x1a\nconteudo')
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(base_url=None, model='glm-5.3-flash', session='projeto', sandbox=False, image=[str(imagem)], tarefa=[])
+    capturado = {}
+    respostas = [subprocess.CompletedProcess([], 0, '[]', ''), subprocess.CompletedProcess([], 0, '{"id":"ses_teste"}', '')]
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher.subprocess, 'run', side_effect=respostas), \
+         patch.object(launcher, '_supervision', side_effect=lambda a, env: capturado.update(args=a, imagem=Path(a[a.index('--image') + 1]).read_bytes()) or 0):
+        launcher.iniciar([], agente=args, tui=True)
+    assert 'run' not in capturado['args']
+    assert capturado['args'][capturado['args'].index('--session') + 1] == 'ses_teste'
+    assert capturado['imagem'] == imagem.read_bytes()
+    assert not Path(capturado['args'][capturado['args'].index('--image') + 1]).exists()
+
+
+def test_agent_imagem_e_sessao_em_terminal_usa_tui(monkeypatch):
+    import passe1
+    monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    with patch.object(launcher, 'iniciar', return_value=0) as iniciar:
+        assert passe1.main(['agent', '--session', 'projeto', '--image', 'foto.png']) == 0
+        assert iniciar.call_args.kwargs['tui'] is True
+        assert iniciar.call_args.kwargs['agente'].image == ['foto.png']
+
+
+def test_tui_anexa_bytes_validados_mesmo_se_origem_mudar(tmp_path, monkeypatch):
+    import argparse
+    imagem = tmp_path / 'foto.png'
+    validada = b'\x89PNG\r\n\x1a\noriginal'
+    imagem.write_bytes(validada)
+    args = argparse.Namespace(base_url=None, model='glm-5.3-flash', session=None, sandbox=False, image=[str(imagem)], tarefa=[])
+    ler_original = launcher.passe1._imagens
+    capturado = {}
+    def trocar(caminhos):
+        partes = ler_original(caminhos)
+        imagem.write_bytes(b'\x89PNG\r\n\x1a\nsubstituida')
+        return partes
+    def executar(argumentos, env):
+        caminho = Path(argumentos[argumentos.index('--image') + 1])
+        capturado.update(dados=caminho.read_bytes(), diretorio=caminho.parent)
+        return 0
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher.passe1, '_imagens', side_effect=trocar), \
+         patch.object(launcher, '_supervision', side_effect=executar):
+        launcher.iniciar([], agente=args, tui=True)
+    assert capturado['dados'] == validada
+    assert not capturado['diretorio'].exists()
+
+
+def test_agent_nao_interativo_anexa_bytes_validados_se_origem_mudar(tmp_path, monkeypatch):
+    import argparse
+    imagem = tmp_path / 'foto.png'
+    validada = b'\x89PNG\r\n\x1a\noriginal'
+    imagem.write_bytes(validada)
+    args = argparse.Namespace(base_url=None, model='glm-5.3-flash', session=None, sandbox=False, image=[str(imagem)], tarefa=['analise'])
+    ler_original = launcher.passe1._imagens
+    capturado = {}
+    def trocar(caminhos):
+        partes = ler_original(caminhos)
+        imagem.write_bytes(b'\x89PNG\r\n\x1a\nsubstituida')
+        return partes
+    def executar(argumentos, env):
+        caminho = Path(argumentos[argumentos.index('--file') + 1])
+        capturado.update(dados=caminho.read_bytes(), diretorio=caminho.parent)
+        return 0
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher.passe1, '_imagens', side_effect=trocar), \
+         patch.object(launcher, '_supervision', side_effect=executar):
+        launcher.iniciar([], agente=args)
+    assert capturado['dados'] == validada
+    assert not capturado['diretorio'].exists()
+
+
+def test_supervisor_preserva_codigo_de_saida():
+    import sys
+    assert launcher._supervision([sys.executable, '-c', 'raise SystemExit(7)'], {}) == 7
+
+
+def test_supervisor_encaminha_sinal_recebido_durante_spawn(monkeypatch):
+    import signal
+    class Processo:
+        recebido = []
+        def send_signal(self, sinal):
+            self.recebido.append(sinal)
+        def wait(self):
+            return -signal.SIGTERM
+        def poll(self):
+            return None
+    processo = Processo()
+    def iniciar(*args, **kwargs):
+        signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return processo
+    monkeypatch.setattr(launcher.subprocess, 'Popen', iniciar)
+    assert launcher._supervision(['motor'], {}) == 128 + signal.SIGTERM
+    assert processo.recebido == [signal.SIGTERM]
+
+
+def test_falha_ao_limpar_staging_nao_e_silenciada(tmp_path):
+    import argparse
+    imagem = tmp_path / 'foto.png'
+    imagem.write_bytes(b'\x89PNG\r\n\x1a\nfixture')
+    args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=False, image=[str(imagem)], tarefa=['teste'])
+    criar_temp = launcher.tempfile.mkdtemp
+    with patch.object(launcher.tempfile, 'mkdtemp', side_effect=lambda prefix: criar_temp(prefix=prefix, dir=tmp_path)), \
+         patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher, '_supervision', return_value=0), \
+         patch.object(launcher.shutil, 'rmtree', side_effect=OSError('falha')):
+        import pytest
+        with pytest.raises(ValueError, match='remover o staging'):
+            launcher.iniciar([], agente=args)

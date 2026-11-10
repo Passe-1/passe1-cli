@@ -42,6 +42,111 @@ index 762a8e61..f6f874f1 100644
            }),
          ),
        })
+diff --git a/packages/opencode/src/cli/cmd/run.ts b/packages/opencode/src/cli/cmd/run.ts
+index cccc2550..32d8f839 100644
+--- a/packages/opencode/src/cli/cmd/run.ts
++++ b/packages/opencode/src/cli/cmd/run.ts
+@@ -17,6 +17,7 @@ import type { Argv } from "yargs"
+ import path from "path"
+ import { pathToFileURL } from "url"
+ import { open } from "node:fs/promises"
++import { createHash } from "node:crypto"
+ import { Effect } from "effect"
+ import { UI } from "../ui"
+ import { effectCmd } from "../effect-cmd"
+@@ -372,8 +373,14 @@ export const RunCommand = effectCmd({
+             process.exit(1)
+           }
+ 
++          const imageHashes = process.env.PASSE1_IMAGE_HASHES
++          let expectedHash: string | undefined
++          if (imageHashes) {
++            try { expectedHash = (JSON.parse(imageHashes) as Record<string, string>)[resolvedPath] } catch { expectedHash = undefined }
++            if (!expectedHash) throw new Error("Imagem inicial sem validação; anexo recusado.")
++          }
+           const content = await (async () => {
+-            if (!args.attach) return
++            if (!args.attach && !expectedHash) return
+             const handle = await open(resolvedPath, "r")
+             try {
+               const opened = await handle.stat()
+@@ -381,7 +388,10 @@ export const RunCommand = effectCmd({
+                 UI.error(`Cannot attach local file larger than 10 MiB or a special file: ${filePath}`)
+                 process.exit(1)
+               }
+-              if (opened.size === 0) return Buffer.alloc(0)
++              if (opened.size === 0) {
++                if (expectedHash && createHash("sha256").update(Buffer.alloc(0)).digest("hex") !== expectedHash) throw new Error("Imagem inicial mudou após a validação; anexo recusado.")
++                return Buffer.alloc(0)
++              }
+               const buffer = Buffer.alloc(Number(opened.size))
+               let offset = 0
+               while (offset < buffer.length) {
+@@ -389,14 +399,16 @@ export const RunCommand = effectCmd({
+                 if (read.bytesRead === 0) break
+                 offset += read.bytesRead
+               }
+-              return buffer.subarray(0, offset)
++              const data = buffer.subarray(0, offset)
++              if (expectedHash && createHash("sha256").update(data).digest("hex") !== expectedHash) throw new Error("Imagem inicial mudou após a validação; anexo recusado.")
++              return data
+             } finally {
+               await handle.close()
+             }
+           })()
+           const detected = FSUtil.mimeType(resolvedPath)
+           const text = content?.toString("utf8")
+-          const mime = !args.attach
++          const mime = expectedHash ? detected : !args.attach
+             ? isDirectory
+               ? "application/x-directory"
+               : "text/plain"
+diff --git a/packages/opencode/src/cli/cmd/session.ts b/packages/opencode/src/cli/cmd/session.ts
+index 9e6ddda9..0470fdf3 100644
+--- a/packages/opencode/src/cli/cmd/session.ts
++++ b/packages/opencode/src/cli/cmd/session.ts
+@@ -44,10 +44,20 @@ function pagerCmd(): string[] {
+ export const SessionCommand = cmd({
+   command: "session",
+   describe: "manage sessions",
+-  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionDeleteCommand).demandCommand(),
++  builder: (yargs: Argv) => yargs.command(SessionListCommand).command(SessionDeleteCommand).command(SessionCreateCommand).demandCommand(),
+   async handler() {},
+ })
+ 
++export const SessionCreateCommand = effectCmd({
++  command: "create",
++  describe: "create a named session",
++  builder: (yargs) => yargs.option("title", { type: "string", demandOption: true }),
++  handler: Effect.fn("Cli.session.create")(function* (args) {
++    const session = yield* Session.Service.use((svc) => svc.create({ title: args.title }))
++    process.stdout.write(JSON.stringify({ id: session.id }) + "\n")
++  }),
++})
++
+ export const SessionDeleteCommand = effectCmd({
+   command: "delete <sessionID>",
+   describe: "delete a session",
+diff --git a/packages/opencode/src/cli/cmd/tui.ts b/packages/opencode/src/cli/cmd/tui.ts
+index d5fa46bf..c2ad5d47 100644
+--- a/packages/opencode/src/cli/cmd/tui.ts
++++ b/packages/opencode/src/cli/cmd/tui.ts
+@@ -97,6 +97,7 @@ export const TuiThreadCommand = cmd({
+         type: "boolean",
+         describe: "fork the session when continuing (use with --continue or --session)",
+       })
++      .option("image", { type: "array", string: true, describe: "initial local images" })
+       .option("prompt", {
+         type: "string",
+         describe: "prompt to use",
+@@ -289,6 +290,7 @@ export const TuiThreadCommand = cmd({
+               sessionID: args.session,
+               agent: args.agent,
+               model: args.model,
++              images: args.image,
+               prompt,
+               fork: args.fork,
+               auto: args.auto || args.yolo || args["dangerously-skip-permissions"],
 diff --git a/packages/opencode/src/session/instruction.ts b/packages/opencode/src/session/instruction.ts
 index 7f593550..ca5bcf1f 100644
 --- a/packages/opencode/src/session/instruction.ts
@@ -67,6 +172,42 @@ index 7f593550..ca5bcf1f 100644
      })
  
      const fetch = Effect.fnUntraced(function* (url: string) {
+diff --git a/packages/opencode/src/session/prompt.ts b/packages/opencode/src/session/prompt.ts
+index 0f85d44f..807a6953 100644
+--- a/packages/opencode/src/session/prompt.ts
++++ b/packages/opencode/src/session/prompt.ts
+@@ -556,10 +556,14 @@ const layer = Layer.effect(
+                 { cwd, sessionID: input.sessionID, callID: part.callID },
+                 { env: {} },
+               )
+-              const cmd = ChildProcess.make(sh, args, {
++              const sandbox = process.env.PASSE1_SANDBOX_COMMANDS === "1"
++              if (sandbox && process.platform !== "darwin") throw new Error("Sandbox de comandos disponível somente no macOS.")
++              const command = sandbox ? "/usr/bin/sandbox-exec" : sh
++              const commandArgs = sandbox ? ["-p", "(version 1)(allow default)(deny network*)(deny file-write*)", sh, ...args] : args
++              const cmd = ChildProcess.make(command, commandArgs, {
+                 cwd,
+                 extendEnv: true,
+-                env: { ...shellEnv.env, TERM: "dumb" },
++                env: { ...shellEnv.env, TERM: "dumb", PASSE1_IMAGE_HASHES: "" },
+                 stdin: "ignore",
+                 forceKillAfter: "3 seconds",
+               })
+@@ -1400,7 +1404,13 @@ const layer = Layer.effect(
+         const sh = Shell.preferred(cfg.shell)
+         const results = yield* Effect.promise(() =>
+           Promise.all(
+-            shellMatches.map(async ([, cmd]) => (await Process.text([cmd], { shell: sh, nothrow: true })).text),
++            shellMatches.map(async ([, cmd]) => {
++              if (process.env.PASSE1_SANDBOX_COMMANDS === "1") {
++                if (process.platform !== "darwin") throw new Error("Sandbox de comandos disponível somente no macOS.")
++                return (await Process.text(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)(deny file-write*)", sh, "-c", cmd], { nothrow: true })).text
++              }
++              return (await Process.text([cmd], { shell: sh, nothrow: true })).text
++            }),
+           ),
+         )
+         let index = 0
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
 index 3f89a639..8ee56c02 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
@@ -437,10 +578,10 @@ index 6ea67124..56deaa7f 100644
            let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..ff15b452
+index 00000000..628c88cc
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,160 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
@@ -452,6 +593,9 @@ index 00000000..ff15b452
 +  const alvo = path.resolve(file)
 +  const raiz = path.parse(alvo).root
 +  const partes = alvo.slice(raiz.length).split(/[\\/]+/).filter(Boolean)
++  if (partes.some((parte) => parte.toLowerCase().startsWith(".passe1-move-") || parte.toLowerCase().startsWith(".passe1-journal-"))) {
++    return yield* Effect.fail(new Error("Quarentena e journal do Passe1 não podem ser acessados por ferramentas."))
++  }
 +  yield* Effect.tryPromise({
 +    try: async () => {
 +      let atual = raiz
@@ -494,7 +638,7 @@ index 00000000..ff15b452
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Leitura segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); sys.argv=[sys.argv[0],sys.argv[2]]; from passe1_engine.secure_stream import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root, file], { stdout: "pipe", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root, file], { stdout: "pipe", stderr: "pipe" })
 +  const metadata = new Response(child.stderr).text()
 +  const reader = child.stdout.getReader()
 +  const first = await reader.read()
@@ -506,7 +650,11 @@ index 00000000..ff15b452
 +        if (item.done) break
 +        yield item.value
 +      }
-+      if (await child.exited !== 0) throw new Error("Leitura segura recusada ou arquivo modificado.")
++      if (await child.exited !== 0) {
++        const detail = await metadata
++        if (detail.includes("salve e feche o editor")) throw new Error("Arquivo em uso para escrita; salve e feche o editor antes de tentar novamente.")
++        throw new Error("Leitura segura recusada ou arquivo modificado.")
++      }
 +    } finally {
 +      reader.releaseLock()
 +      if (child.exitCode === null) child.kill()
@@ -537,7 +685,7 @@ index 00000000..ff15b452
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Criação segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
 +  const output = new Response(child.stdout).text()
 +  child.stdin.write(JSON.stringify({ caminho: file, operacao: "preparar" }))
 +  child.stdin.end()
@@ -553,7 +701,7 @@ index 00000000..ff15b452
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Escrita segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
 +  const output = new Response(child.stdout).text()
 +  child.stdin.write(JSON.stringify({ caminho: file, anterior: previous, novo: next, identidade }))
 +  child.stdin.end()
@@ -574,7 +722,7 @@ index 00000000..ff15b452
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Remoção segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "ignore", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root], { stdin: "pipe", stdout: "ignore", stderr: "pipe" })
 +  child.stdin.write(JSON.stringify({ caminho: file, anterior: previous, operacao: "remover", identidade }))
 +  child.stdin.end()
 +  if (await child.exited !== 0) throw new Error("Remoção segura recusada ou arquivo mudou durante aprovação.")
@@ -585,7 +733,7 @@ index 00000000..ff15b452
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  if (!python || !root) throw new Error("Busca segura indisponível: helper não configurado.")
 +  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_search import _main; sys.exit(_main())"
-+  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
 +  const output = new Response(child.stdout).text()
 +  child.stdin.write(JSON.stringify({ padrao: pattern, caminhos: paths, ripgrep }))
 +  child.stdin.end()
@@ -595,7 +743,7 @@ index 00000000..ff15b452
 +  return items.map(([path, line, text]) => ({ path, line, text }))
 +}
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 678ed445..115c44d3 100644
+index 678ed445..7de2d670 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
 @@ -7,6 +7,7 @@ import { LSP } from "@/lsp/lsp"
@@ -673,21 +821,37 @@ index 678ed445..115c44d3 100644
        )
  
        return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
-@@ -236,6 +234,8 @@ export const ReadTool = Tool.define<
+@@ -236,18 +234,21 @@ export const ReadTool = Tool.define<
          filepath = path.resolve(instance.directory, filepath)
        }
        if (process.platform === "win32") {
+-        filepath = FSUtil.normalizePath(filepath)
 +        const root = path.parse(filepath).root
 +        if (root === "\\" || root === "/") filepath = path.resolve(instance.directory, filepath)
-         filepath = FSUtil.normalizePath(filepath)
        }
++      const safePath = filepath
++      if (process.platform === "win32") filepath = FSUtil.normalizePath(filepath)
        const title = path.relative(instance.worktree, filepath)
-@@ -260,6 +260,15 @@ export const ReadTool = Tool.define<
+ 
+-      const stat = yield* fs.stat(filepath).pipe(
++      const stat = yield* fs.stat(safePath).pipe(
+         Effect.catchIf(
+           (err) => "reason" in err && err.reason._tag === "NotFound",
+           () => Effect.succeed(undefined),
+         ),
+       )
+ 
+-      yield* assertExternalDirectoryEffect(ctx, filepath, {
++      yield* assertExternalDirectoryEffect(ctx, safePath, {
+         bypass: Boolean(ctx.extra?.["bypassCwdCheck"]),
+         kind: stat?.type === "Directory" ? "directory" : "file",
+       })
+@@ -260,9 +261,18 @@ export const ReadTool = Tool.define<
        })
  
        if (!stat) return yield* miss(filepath)
-+      yield* verificar(fs, filepath)
-+      if (stat.type === "File" && sensitive(filepath)) {
++      yield* verificar(fs, safePath)
++      if (stat.type === "File" && (sensitive(safePath) || sensitive(filepath))) {
 +        yield* ctx.ask({
 +          permission: "passe1_sensitive_read",
 +          patterns: [path.relative(instance.worktree, filepath)],
@@ -697,15 +861,20 @@ index 678ed445..115c44d3 100644
 +      }
  
        if (stat.type === "Directory") {
-         const items = yield* list(filepath)
-@@ -297,14 +306,16 @@ export const ReadTool = Tool.define<
+-        const items = yield* list(filepath)
++        const items = yield* list(safePath)
+         const limit = params.limit ?? DEFAULT_READ_LIMIT
+         const offset = params.offset || 1
+         const start = offset - 1
+@@ -297,14 +307,16 @@ export const ReadTool = Tool.define<
          }
        }
  
-+      yield* verificar(fs, filepath)
-+      const opened = yield* Effect.tryPromise({ try: () => abrirSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
-       const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
+-      const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
 -      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
++      yield* verificar(fs, safePath)
++      const opened = yield* Effect.tryPromise({ try: () => abrirSeguro(safePath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
++      const loaded = yield* instruction.resolve(ctx.messages, safePath, ctx.messageID)
 +      const sample = opened.sample.subarray(0, SAMPLE_BYTES)
  
        const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
@@ -717,7 +886,7 @@ index 678ed445..115c44d3 100644
          const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
          return {
            title,
-@@ -325,10 +336,11 @@ export const ReadTool = Tool.define<
+@@ -325,10 +337,11 @@ export const ReadTool = Tool.define<
        }
  
        if (isBinaryFile(filepath, sample)) {
@@ -730,6 +899,15 @@ index 678ed445..115c44d3 100644
        if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
          return yield* Effect.fail(
            new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
+@@ -350,7 +363,7 @@ export const ReadTool = Tool.define<
+       }
+       output += "\n</content>"
+ 
+-      yield* warm(filepath)
++      yield* warm(safePath)
+ 
+       if (loaded.length > 0) {
+         output += `\n\n<system-reminder>\n${loaded.map((item) => item.content).join("\n\n")}\n</system-reminder>`
 diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
 index 9167cb3e..6ba14f18 100644
 --- a/packages/opencode/src/tool/registry.ts
@@ -747,6 +925,37 @@ index 9167cb3e..6ba14f18 100644
    ],
  })
  
+diff --git a/packages/opencode/src/tool/shell.ts b/packages/opencode/src/tool/shell.ts
+index 1e4423e0..8629b578 100644
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -291,6 +291,12 @@ const ask = Effect.fn("ShellTool.ask")(function* (ctx: Tool.Context, scan: Scan,
+ })
+ 
+ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
++  if (process.env.PASSE1_SANDBOX_COMMANDS === "1") {
++    if (process.platform !== "darwin") throw new Error("Sandbox de comandos disponível somente no macOS.")
++    return ChildProcess.make("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)(deny file-write*)", shell, "-c", command], {
++      cwd, env, stdin: "ignore", detached: true,
++    })
++  }
+   if (process.platform === "win32" && Shell.ps(shell)) {
+     return ChildProcess.make(shell, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command], {
+       cwd,
+@@ -419,10 +425,9 @@ export const ShellTool = Tool.define(
+         { cwd, sessionID: ctx.sessionID, callID: ctx.callID },
+         { env: {} },
+       )
+-      return {
+-        ...process.env,
+-        ...extra.env,
+-      }
++      const env: NodeJS.ProcessEnv = { ...process.env, ...extra.env }
++      delete env.PASSE1_IMAGE_HASHES
++      return env
+     })
+ 
+     const run = Effect.fn("ShellTool.run")(function* (
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
 index 37be6d8c..75ebd1a6 100644
 --- a/packages/opencode/src/tool/write.ts
@@ -796,6 +1005,40 @@ index 37be6d8c..75ebd1a6 100644
            yield* lsp.touchFile(filepath, "document")
            const diagnostics = yield* lsp.diagnostics()
            const normalizedFilepath = FSUtil.normalizePath(filepath)
+diff --git a/packages/opencode/test/session/prompt.test.ts b/packages/opencode/test/session/prompt.test.ts
+index da6e0f8d..aacfc1b3 100644
+--- a/packages/opencode/test/session/prompt.test.ts
++++ b/packages/opencode/test/session/prompt.test.ts
+@@ -2468,3 +2468,29 @@ noLLMServer.instance(
+     }),
+   30_000,
+ )
++
++unixNoLLMServer(
++  "sandbox protege shell direto da TUI",
++  () => withSh(() => Effect.gen(function* () {
++    if (process.platform !== "darwin") return
++    const { directory: dir } = yield* TestInstance
++    const { prompt, chat } = yield* boot()
++    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("NETWORK_ALLOWED") })
++    const anterior = process.env.PASSE1_SANDBOX_COMMANDS
++    process.env.PASSE1_SANDBOX_COMMANDS = "1"
++    try {
++      const result = yield* prompt.shell({ sessionID: chat.id, agent: "build", command: `cat /etc/hosts; touch ${JSON.stringify(path.join(dir, "negado"))}; /usr/bin/curl -sS -m 3 http://127.0.0.1:${server.port}` })
++      const tool = completedTool(result.parts)
++      expect(tool).toBeDefined()
++      if (!tool) return
++      expect(tool.state.output).toContain("localhost")
++      expect(tool.state.output).not.toContain("NETWORK_ALLOWED")
++      expect(yield* Effect.promise(() => Bun.file(path.join(dir, "negado")).exists())).toBe(false)
++    } finally {
++      server.stop(true)
++      if (anterior === undefined) delete process.env.PASSE1_SANDBOX_COMMANDS
++      else process.env.PASSE1_SANDBOX_COMMANDS = anterior
++    }
++  })),
++  { config: cfg },
++)
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 index 74203615..6e8f882d 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
@@ -921,7 +1164,7 @@ index 46155a50..49c83d81 100644
      it.instance("creates new file when oldString is empty", () =>
        Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 13858f9f..da1ec5e2 100644
+index 13858f9f..ca3826df 100644
 --- a/packages/opencode/test/tool/grep.test.ts
 +++ b/packages/opencode/test/tool/grep.test.ts
 @@ -1,3 +1,4 @@
@@ -938,10 +1181,20 @@ index 13858f9f..da1ec5e2 100644
    )
  
  const it = testEffect(toolLayer())
-@@ -77,6 +78,31 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
+@@ -77,6 +78,41 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
  })
  
  describe("tool.grep", () => {
++  it.instance("não expõe conteúdo de quarentena", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, ".passe1-move-" + "a".repeat(32) + "-origem")
++    yield* Effect.promise(() => Bun.write(arquivo, "SEGREDO_QUARENTENA"))
++    const info = yield* GrepTool
++    const grep = yield* info.init()
++    const result = yield* grep.execute({ pattern: "SEGREDO_QUARENTENA", path: test.directory }, ctx)
++    expect(result.output).not.toContain("SEGREDO_QUARENTENA")
++  }))
++
 +  it.instance("avisa busca incompleta sem resultados no limite de candidatos", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const service = yield* Ripgrep.Service
@@ -970,7 +1223,7 @@ index 13858f9f..da1ec5e2 100644
    rooted.live("basic search", () =>
      Effect.gen(function* () {
        const info = yield* GrepTool
-@@ -170,7 +196,7 @@ describe("tool.grep", () => {
+@@ -170,7 +206,7 @@ describe("tool.grep", () => {
      }),
    )
  
@@ -979,7 +1232,7 @@ index 13858f9f..da1ec5e2 100644
      Effect.gen(function* () {
        if (process.platform === "win32") return
  
-@@ -214,10 +240,9 @@ describe("tool.grep", () => {
+@@ -214,10 +250,9 @@ describe("tool.grep", () => {
          next,
        )
  
@@ -993,7 +1246,7 @@ index 13858f9f..da1ec5e2 100644
    )
  })
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index c1ef61b2..549bd3ba 100644
+index c1ef61b2..a510426b 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
@@ -1004,11 +1257,20 @@ index c1ef61b2..549bd3ba 100644
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -312,7 +313,91 @@ describe("tool.read env file permissions", () => {
+@@ -312,7 +313,100 @@ describe("tool.read env file permissions", () => {
    }
  })
  
 +describe("Passe1 hard links", () => {
++  it.instance("recusa ler quarentena de move", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, ".passe1-move-" + "a".repeat(32) + "-origem")
++    yield* Effect.promise(() => Bun.write(arquivo, "SEGREDO_QUARENTENA"))
++    const erro = yield* fail(test.directory, { filePath: arquivo })
++    expect(erro.message).toContain("Quarentena")
++    expect(erro.message).not.toContain("SEGREDO_QUARENTENA")
++  }))
++
 +  it.instance("recusa troca por symlink durante aprovação", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const arquivo = path.join(test.directory, "credencial.pem")
@@ -1096,7 +1358,7 @@ index c1ef61b2..549bd3ba 100644
    it.instance("truncates large file by bytes and sets truncated metadata", () =>
      Effect.gen(function* () {
        const test = yield* TestInstance
-@@ -568,6 +653,15 @@ root_type Monster;`
+@@ -568,6 +662,15 @@ root_type Monster;`
  })
  
  describe("tool.read loaded instructions", () => {
@@ -1112,6 +1374,36 @@ index c1ef61b2..549bd3ba 100644
    it.live("loads AGENTS.md from parent directory and includes in metadata", () =>
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
+diff --git a/packages/opencode/test/tool/shell.test.ts b/packages/opencode/test/tool/shell.test.ts
+index a970f85d..07bc897c 100644
+--- a/packages/opencode/test/tool/shell.test.ts
++++ b/packages/opencode/test/tool/shell.test.ts
+@@ -181,6 +181,25 @@ const mustTruncate = (result: {
+ }
+ 
+ describe("tool.shell", () => {
++  it.live("sandbox bloqueia escrita e rede sem bloquear leitura", () => Effect.gen(function* () {
++    if (process.platform !== "darwin") return
++    const tmp = yield* tmpdirScoped()
++    const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("NETWORK_ALLOWED") })
++    const anterior = process.env.PASSE1_SANDBOX_COMMANDS
++    process.env.PASSE1_SANDBOX_COMMANDS = "1"
++    try {
++      const result = yield* runIn(tmp, run({ command: `cat /etc/hosts; touch ${JSON.stringify(path.join(tmp, "negado"))}; /usr/bin/curl -sS -m 3 http://127.0.0.1:${server.port}` }))
++      expect(result.metadata.exit).not.toBe(0)
++      expect(result.metadata.output).toContain("localhost")
++      expect(result.metadata.output).not.toContain("NETWORK_ALLOWED")
++      expect(yield* Effect.promise(() => Bun.file(path.join(tmp, "negado")).exists())).toBe(false)
++    } finally {
++      server.stop(true)
++      if (anterior === undefined) delete process.env.PASSE1_SANDBOX_COMMANDS
++      else process.env.PASSE1_SANDBOX_COMMANDS = anterior
++    }
++  }))
++
+   each("basic", () =>
+     runIn(
+       projectRoot,
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
 index 4f897dc8..66398c66 100644
 --- a/packages/opencode/test/tool/write.test.ts
@@ -1211,3 +1503,65 @@ index 4f897dc8..66398c66 100644
      it.instance("returns diff in metadata for existing files", () =>
        Effect.gen(function* () {
          const test = yield* TestInstance
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+index c48c7517..a4add1f5 100644
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -12,6 +12,7 @@ import type { CommandContext } from "@opentui/keymap"
+ import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+ import { registerOpencodeSpinner } from "../register-spinner"
+ import path from "path"
++import { createHash } from "node:crypto"
+ import { fileURLToPath } from "url"
+ import { useLocal } from "../../context/local"
+ import { Flag } from "@opencode-ai/core/flag/flag"
+@@ -139,6 +140,7 @@ function formatEditorContext(selection: EditorSelection) {
+ }
+ 
+ let stashed: { prompt: PromptInfo; cursor: number } | undefined
++let initialImagesLoaded = false
+ 
+ export function Prompt(props: PromptProps) {
+   let input: TextareaRenderable
+@@ -1428,6 +1430,29 @@ export function Prompt(props: PromptProps) {
+                   promptPartTypeId = input.extmarks.registerType("prompt-part")
+                 }
+                 props.ref?.(ref)
++                if (!initialImagesLoaded && args.images?.length) {
++                  initialImagesLoaded = true
++                  const images = [...args.images]
++                  setTimeout(async () => {
++                    for (const image of images) {
++                      if (!input || input.isDestroyed) return
++                      const attachment = await readLocalAttachment(image)
++                      if (!attachment || attachment.type !== "binary" || !attachment.mime.startsWith("image/")) {
++                        toast.show({ message: "Não foi possível carregar a imagem inicial.", variant: "error" })
++                        continue
++                      }
++                      const rawHashes = process.env.PASSE1_IMAGE_HASHES
++                      let hashes: Record<string, string> = {}
++                      try { hashes = rawHashes ? JSON.parse(rawHashes) : {} } catch { hashes = {} }
++                      const expected = hashes[image]
++                      if (rawHashes && (!expected || createHash("sha256").update(attachment.content).digest("hex") !== expected)) {
++                        toast.show({ message: "Imagem inicial mudou após a validação; anexo recusado.", variant: "error" })
++                        continue
++                      }
++                      await pasteAttachment({ filename: path.basename(image), filepath: image, mime: attachment.mime, content: Buffer.from(attachment.content).toString("base64") })
++                    }
++                  }, 0)
++                }
+                 setTimeout(() => {
+                   // setTimeout is a workaround and needs to be addressed properly
+                   if (!input || input.isDestroyed) return
+diff --git a/packages/tui/src/context/args.tsx b/packages/tui/src/context/args.tsx
+index 9a528f2f..018f59a9 100644
+--- a/packages/tui/src/context/args.tsx
++++ b/packages/tui/src/context/args.tsx
+@@ -2,6 +2,7 @@ import { createSimpleContext } from "./helper"
+ 
+ export interface Args {
+   model?: string
++  images?: string[]
+   agent?: string
+   prompt?: string
+   continue?: boolean

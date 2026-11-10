@@ -32,7 +32,7 @@ def _disponivel():
         raise RuntimeError("Operações seguras de arquivo indisponíveis nesta plataforma.")
 
 
-def _partes(raiz, caminho):
+def _partes(raiz, caminho, permitir_quarentena=False):
     _disponivel()
     projeto = Path(os.path.abspath(raiz))
     alvo = Path(caminho)
@@ -44,12 +44,14 @@ def _partes(raiz, caminho):
     partes = alvo.parts
     if not partes or any(p in {"..", "."} for p in partes):
         raise ValueError("Caminho inválido ou fora do projeto.")
+    if not permitir_quarentena and any(p.lower().startswith((".passe1-move-", ".passe1-journal-")) for p in (*projeto.parts, *partes)):
+        raise ValueError("Quarentena e journal do Passe1 não podem ser acessados por ferramentas.")
     return projeto, partes
 
 
 @contextlib.contextmanager
-def _pai(raiz, caminho, criar=False, esperados=None):
-    projeto, partes = _partes(raiz, caminho)
+def _pai(raiz, caminho, criar=False, esperados=None, permitir_quarentena=False):
+    projeto, partes = _partes(raiz, caminho, permitir_quarentena=permitir_quarentena)
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     fds = []
     try:
@@ -115,12 +117,12 @@ def _abrir_arquivo(pai, nome):
         raise
 
 
-def ler(raiz, caminho, limite=None):
+def ler(raiz, caminho, limite=None, *, permitir_quarentena=False):
     """Lê texto UTF-8 e retorna conteúdo e versão para revalidar uma edição."""
     if limite is not None and (not isinstance(limite, int) or limite < 0):
         raise ValueError("Limite inválido.")
     raiz_resolvida = Path(os.path.abspath(raiz))
-    with _pai(raiz_resolvida, caminho) as (pai, nome, pais):
+    with _pai(raiz_resolvida, caminho, permitir_quarentena=permitir_quarentena) as (pai, nome, pais):
         fd, antes = _abrir_arquivo(pai, nome)
         try:
             with os.fdopen(os.dup(fd), "r", encoding="utf-8", newline="") as arquivo:

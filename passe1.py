@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import datetime
 import getpass
 import hashlib
@@ -698,11 +699,28 @@ def _imagens(caminhos: list[str]) -> list[dict]:
     for nome in caminhos:
         try:
             caminho = Path(nome)
-            if not caminho.is_file():
-                raise OSError("Não é arquivo regular.")
-            with caminho.open("rb") as arquivo:
-                dados = arquivo.read(limite - total + 1)
-        except OSError as exc:
+            # macOS expõe /tmp e /var como aliases de sistema para /private.
+            # Preserve a verificação sem seguir links nos demais componentes.
+            if sys.platform == "darwin" and caminho.is_absolute():
+                for alias in (Path("/tmp"), Path("/var")):
+                    try:
+                        if caminho.is_relative_to(alias) and os.readlink(alias) == "private/" + alias.name:
+                            caminho = Path("/private") / caminho.relative_to("/")
+                            break
+                    except OSError:
+                        pass
+            if any(parte.lower().startswith((".passe1-move-", ".passe1-journal-")) for parte in caminho.parts):
+                raise ValueError("Quarentena e journal do Passe1 não podem ser anexados.")
+            from passe1_engine.secure_stream import transmitir
+            class ImagemLimitada(io.BytesIO):
+                def write(self, bloco):
+                    if self.tell() + len(bloco) > limite - total:
+                        raise ValueError("As imagens ultrapassam o limite total de 4 MiB.")
+                    return super().write(bloco)
+            arquivo = ImagemLimitada()
+            transmitir(caminho, arquivo)
+            dados = arquivo.getvalue()
+        except (OSError, RuntimeError) as exc:
             raise ValueError(f"Não consegui ler a imagem: {nome}.") from exc
         total += len(dados)
         if total > limite:
@@ -1002,13 +1020,14 @@ def cmd_chat(args: argparse.Namespace) -> int:
 def cmd_agent(args: argparse.Namespace) -> int:
     import agente
 
+    if not args.tarefa and sys.stdin.isatty() and sys.stdout.isatty():
+        from passe1_engine.launcher import iniciar
+        if not args.model and not args.sandbox and not args.base_url and not args.session and not args.image:
+            return iniciar([])
+        return iniciar([], agente=args, tui=True)
     if os.name == "nt":
         from passe1_engine.launcher import iniciar
         return iniciar([], agente=args)
-    if (not args.tarefa and not args.model and not args.session and not args.sandbox and not args.image and not args.base_url
-            and sys.stdin.isatty() and sys.stdout.isatty()):
-        from passe1_engine.launcher import iniciar
-        return iniciar([])
     chave = _ler_chave(_base_url(args.base_url))
     if chave is None:
         return _sem_login()

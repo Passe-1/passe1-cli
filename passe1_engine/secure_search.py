@@ -13,7 +13,8 @@ from passe1_engine import secure_stream
 def _sensivel(caminho):
     partes = [parte.lower() for parte in caminho.parts]
     nome = caminho.name.lower()
-    return (any(p in {'.ssh', '.aws', '.gnupg', '.config'} for p in partes)
+    return (any(p.startswith(('.passe1-move-', '.passe1-journal-')) for p in partes)
+            or any(p in {'.ssh', '.aws', '.gnupg', '.config'} for p in partes)
             or nome in {'.env', '.envrc', '.npmrc', '.pypirc', '.netrc', '.dockerconfigjson', 'credentials', 'token', 'secrets'}
             or nome.startswith(('.env.', 'credentials.', 'secrets.', 'secret.', 'token.', 'private_key', 'id_rsa', 'id_ed25519', 'id_ecdsa', 'service-account'))
             or nome.endswith(('.env', '.pem', '.key', '.p12', '.pfx', '.keystore')))

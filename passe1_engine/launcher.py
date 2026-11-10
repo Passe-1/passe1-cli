@@ -1,10 +1,13 @@
 """Interface Passe1 usando motor OpenCode incorporado ao pacote."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
 import re
+import signal
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -96,10 +99,55 @@ def _instrucoes():
     return []
 
 
-def iniciar(argv=None, *, agente=None):
+
+def _supervision(comando, ambiente):
+    """Mantém o terminal e espera o motor terminar antes de limpar anexos."""
+    anterior_int = signal.getsignal(signal.SIGINT)
+    anterior_term = signal.getsignal(signal.SIGTERM)
+    anterior_hup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
+    processo = None
+    pendentes = []
+    def encaminhar(signum, _quadro):
+        if processo is None:
+            pendentes.append(signum)
+            return
+        # Ctrl+C do terminal já chega ao grupo do filho. SIGTERM/SIGHUP
+        # também podem ser enviados somente ao supervisor.
+        if signum == signal.SIGINT:
+            return
+        try:
+            processo.send_signal(signum)
+        except ProcessLookupError:
+            pass
+    try:
+        signal.signal(signal.SIGINT, encaminhar)
+        signal.signal(signal.SIGTERM, encaminhar)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, encaminhar)
+        processo = subprocess.Popen(comando, env=ambiente)
+        for signum in pendentes:
+            try:
+                processo.send_signal(signum)
+            except ProcessLookupError:
+                break
+        codigo = processo.wait()
+        return 128 - codigo if codigo < 0 else codigo
+    except BaseException:
+        if processo is not None and processo.poll() is None:
+            processo.terminate()
+            processo.wait()
+        raise
+    finally:
+        signal.signal(signal.SIGINT, anterior_int)
+        signal.signal(signal.SIGTERM, anterior_term)
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, anterior_hup)
+
+
+def iniciar(argv=None, *, agente=None, tui=False):
     args = list(sys.argv[1:] if argv is None else argv)
-    if agente is not None and agente.sandbox:
-        print("O sandbox do agente legado está disponível apenas no macOS.")
+    if agente is not None and agente.sandbox and (sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK)):
+        print("Sandbox de comandos disponível somente no macOS com sandbox-exec; nenhum pedido foi enviado.")
         return 1
     if args and args[0] in {"login", "status", "logout", "keys", "config", "models"}:
         return passe1.main(args)
@@ -123,15 +171,17 @@ def iniciar(argv=None, *, agente=None):
     config = {"provider": {"passe1": {"npm": "@ai-sdk/openai-compatible", "name": "Passe1", "options": {"baseURL": base}, "models": modelos}}, "model": "passe1/" + modelo, "enabled_providers": ["passe1"], "permission": {"edit": "ask", "bash": "ask", "external_directory": "ask", "webfetch": "ask", "websearch": "ask", "passe1_sensitive_read": "ask", "read": {"*": "allow", "*.env*": "ask", "*.pem": "ask", "*.key": "ask", "*.p12": "ask", "*.pfx": "ask", "*.keystore": "ask", "*.ssh/*": "ask", "*.aws/*": "ask", "*.gnupg/*": "ask", "*.config/*": "ask", "*.npmrc": "ask", "*.pypirc": "ask", "*.netrc": "ask", "*.dockerconfigjson": "ask", "*credentials*": "ask", "*secrets*": "ask", "*secret.*": "ask", "*token*": "ask", "*private_key*": "ask", "*id_rsa*": "ask", "*id_ed25519*": "ask", "*id_ecdsa*": "ask", "*service-account*": "ask"}}, "instructions": _instrucoes()}
     _guardar_credencial(chave)
     raiz = _raiz()
-    ambiente = {nome: valor for nome, valor in os.environ.items() if not nome.startswith("OPENCODE_") and nome != "PASSE1_API_KEY"}
+    ambiente = {nome: valor for nome, valor in os.environ.items() if not nome.startswith("OPENCODE_") and nome not in {"PASSE1_API_KEY", "PASSE1_SANDBOX_COMMANDS", "PASSE1_IMAGE_STAGE", "PASSE1_IMAGE_HASHES"}}
     ambiente["PWD"] = str(Path.cwd().resolve())
+    if agente is not None and agente.sandbox:
+        ambiente["PASSE1_SANDBOX_COMMANDS"] = "1"
     ambiente["PASSE1_BUNDLED_RG"] = str(Path(__file__).resolve().parent / "bin" / ("rg.exe" if os.name == "nt" else "rg"))
     ambiente["PASSE1_SECURE_PYTHON"] = sys.executable
     ambiente["PASSE1_SECURE_ROOT"] = str(Path(__file__).resolve().parent.parent)
     ambiente.update({"OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1", "XDG_CONFIG_HOME": str(raiz / "config"), "XDG_DATA_HOME": str(raiz / "data"), "XDG_STATE_HOME": str(raiz / "state"), "XDG_CACHE_HOME": str(raiz / "cache")})
     if agente is not None:
-        passe1._imagens(agente.image or [])
-        comando = [str(binario), "run", "--pure", "-m", "passe1/" + modelo]
+        imagens_validadas = passe1._imagens(agente.image or [])
+        comando = [str(binario)] + ([] if tui else ["run"]) + ["--pure", "-m", "passe1/" + modelo]
         if agente.session:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agente.session):
                 print("Nome de sessão inválido.")
@@ -152,17 +202,49 @@ def iniciar(argv=None, *, agente=None):
                     if not isinstance(id_sessao, str) or not re.fullmatch(r"ses_[A-Za-z0-9_-]+", id_sessao):
                         raise ValueError("identificador inválido")
                     comando += ["--session", id_sessao]
+                elif tui:
+                    criada = subprocess.run([str(binario), "session", "create", "--title", titulo, "--pure"], env=ambiente, capture_output=True, text=True, timeout=30, check=True)
+                    id_sessao = json.loads(criada.stdout).get("id")
+                    if not isinstance(id_sessao, str) or not re.fullmatch(r"ses_[A-Za-z0-9_-]+", id_sessao):
+                        raise ValueError("identificador inválido")
+                    comando += ["--session", id_sessao]
                 else:
                     comando += ["--title", titulo]
-            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+            except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
                 print("Não foi possível localizar a sessão com segurança.")
                 return 1
         comando.extend(agente.tarefa)
-        for imagem in agente.image or []:
-            comando += ["--file", str(Path(imagem).resolve(strict=True))]
-        if not agente.tarefa:
-            comando.append("--interactive")
-        return os.execvpe(str(binario), comando, ambiente)
+        pasta_imagens = None
+        try:
+            if imagens_validadas:
+                if os.name == "nt":
+                    print("Anexos iniciais no Windows aguardam diretório temporário com proteção de acesso validada.")
+                    return 1
+                pasta_imagens = Path(tempfile.mkdtemp(prefix="passe1-cli-images-"))
+                extensoes = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+                hashes_imagens = {}
+                for indice, parte in enumerate(imagens_validadas):
+                    cabecalho, codificado = parte["image_url"]["url"].split(",", 1)
+                    mime = cabecalho.removeprefix("data:").removesuffix(";base64")
+                    destino = pasta_imagens / (f"imagem-{indice}" + extensoes[mime])
+                    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    dados = base64.b64decode(codificado, validate=True)
+                    with os.fdopen(fd, "wb") as arquivo:
+                        arquivo.write(dados)
+                    hashes_imagens[str(destino)] = hashlib.sha256(dados).hexdigest()
+                    comando += ["--image" if tui else "--file", str(destino)]
+                ambiente["PASSE1_IMAGE_HASHES"] = json.dumps(hashes_imagens)
+            if not agente.tarefa and not tui:
+                comando.append("--interactive")
+            if pasta_imagens is not None:
+                return _supervision(comando, ambiente)
+            return os.execvpe(str(binario), comando, ambiente)
+        finally:
+            if pasta_imagens is not None:
+                try:
+                    shutil.rmtree(pasta_imagens)
+                except OSError as exc:
+                    raise ValueError(f"Não foi possível remover o staging de imagens em {pasta_imagens}; remova-o manualmente.") from exc
     return os.execvpe(str(binario), [str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
 
 
