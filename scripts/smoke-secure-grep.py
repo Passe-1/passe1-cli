@@ -66,7 +66,7 @@ def main():
             from passe1_engine import launcher
             passe1._guardar_chave('sk-passe1-fixture')
             capturado = {}
-            with patch.object(launcher.os, 'execvpe', side_effect=lambda binary, args, env: capturado.update(binary=binary, env=env)):
+            with patch.object(launcher, '_executar_motor', side_effect=lambda args, env: capturado.update(binary=args[0], env=env)):
                 launcher.iniciar([])
             ambiente = capturado['env']
             if os.name != 'nt':

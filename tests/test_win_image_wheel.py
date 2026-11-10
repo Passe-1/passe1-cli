@@ -44,7 +44,7 @@ import passe1
 from passe1_engine import launcher
 passe1._guardar_chave('sk-passe1-fixture')
 capturado = {}
-launcher.os.execvpe = lambda binario, args, env: capturado.update(binario=binario, env=env)
+launcher._executar_motor = lambda args, env: capturado.update(binario=args[0], env=env)
 launcher.iniciar([])
 print(json.dumps(capturado))
 '''

@@ -148,6 +148,12 @@ def _supervision(comando, ambiente):
             signal.signal(signal.SIGHUP, anterior_hup)
 
 
+
+def _executar_motor(comando, ambiente):
+    if _eh_windows():
+        return _supervision(comando, ambiente)
+    return os.execvpe(comando[0], comando, ambiente)
+
 def iniciar(argv=None, *, agente=None, tui=False):
     args = list(sys.argv[1:] if argv is None else argv)
     if agente is not None and agente.sandbox and (sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK)):
@@ -257,14 +263,14 @@ def iniciar(argv=None, *, agente=None, tui=False):
                         arquivo.write(dados)
                     caminhos.append(destino)
                 return executar_com_imagens(caminhos)
-            return os.execvpe(str(binario), comando, ambiente)
+            return _executar_motor(comando, ambiente)
         finally:
             if pasta_imagens is not None:
                 try:
                     shutil.rmtree(pasta_imagens)
                 except OSError as exc:
                     raise ValueError(f"Não foi possível remover o staging de imagens em {pasta_imagens}; remova-o manualmente.") from exc
-    return os.execvpe(str(binario), [str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
+    return _executar_motor([str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
 
 
 if __name__ == "__main__":

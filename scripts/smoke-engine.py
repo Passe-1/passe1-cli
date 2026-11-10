@@ -64,13 +64,13 @@ def executar(pasta):
     from passe1_engine import launcher
 
     passe1._guardar_chave("sk-passe1-fixture")
-    exec_original = launcher.os.execvpe
+    exec_original = launcher._executar_motor
     capturado = {}
     try:
-        launcher.os.execvpe = lambda binario, args, env: capturado.update(binario=binario, env=env)
+        launcher._executar_motor = lambda args, env: capturado.update(binario=args[0], env=env)
         launcher.iniciar([])
     finally:
-        launcher.os.execvpe = exec_original
+        launcher._executar_motor = exec_original
     resultado = subprocess.run([capturado["binario"], "run", "--pure", "--format", "json", "-m", "passe1/glm-5.3-flash", "Responda OK."], env=capturado["env"], capture_output=True, text=True, timeout=120, check=False)
     servidor.shutdown()
     servidor.server_close()

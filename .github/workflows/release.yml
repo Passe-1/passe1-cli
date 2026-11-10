@@ -39,6 +39,8 @@ jobs:
       - id: installed_wheel
         run: python -c "import glob,subprocess,sys; subprocess.check_call([sys.executable,'-m','pip','install','--force-reinstall',glob.glob('dist/*.whl')[0]])"
       - run: python -c "import os,subprocess,tempfile; os.chdir(tempfile.gettempdir()); import passe1_engine.launcher as l; from pathlib import Path; p=Path(l.__file__).parent/'bin'/('opencode.exe' if os.name=='nt' else 'opencode'); subprocess.check_call([str(p),'--version'])"
+      - if: runner.os == 'Windows'
+        run: python scripts/smoke-windows-exec.py
       - run: python scripts/smoke-engine.py
       - run: python scripts/smoke-secure-grep.py
       - run: python scripts/smoke-image-integrity.py

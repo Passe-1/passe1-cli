@@ -9,15 +9,15 @@ from passe1_engine import launcher
 
 def test_interface_configurada_sem_expor_chave(tmp_path, monkeypatch, capsys):
     capturado = {}
-    def executar(binario, argumentos, ambiente):
-        capturado.update(binario=binario, argumentos=argumentos, ambiente=ambiente)
+    def executar(argumentos, ambiente):
+        capturado.update(binario=argumentos[0], argumentos=argumentos, ambiente=ambiente)
         raise SystemExit(0)
     monkeypatch.setenv("OPENCODE_CONFIG", "/config/global")
     with patch.object(launcher.Path, 'is_file', return_value=True), \
          patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'glm-5.3-flash', 'tool_call': True}}), \
-         patch.object(launcher.os, 'execvpe', side_effect=executar):
+         patch.object(launcher, '_executar_motor', side_effect=executar):
         try:
             launcher.iniciar([])
         except SystemExit as exc:
@@ -47,7 +47,7 @@ def test_sem_chave_pede_login_antes_de_iniciar(tmp_path):
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'glm-5.3-flash', 'tool_call': True}}), \
          patch.object(launcher.passe1, 'main', return_value=0) as main, \
-         patch.object(launcher.os, 'execvpe', side_effect=SystemExit(0)):
+         patch.object(launcher, '_executar_motor', side_effect=SystemExit(0)):
         try:
             launcher.iniciar([])
         except SystemExit as exc:
@@ -381,3 +381,19 @@ def test_windows_distingue_erro_do_motor_e_de_limpeza(tmp_path, monkeypatch):
              patch.object(launcher, '_supervision', return_value=0):
             with pytest.raises(ValueError, match='preparar ou limpar'):
                 launcher.iniciar([], agente=args)
+
+
+def test_windows_inicia_motor_com_supervisor_sem_execvpe(tmp_path, monkeypatch):
+    import argparse
+    args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=False, image=None, tarefa=['teste'])
+    monkeypatch.setattr(launcher, '_eh_windows', lambda: True)
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher, '_supervision', return_value=7) as supervision, \
+         patch.object(launcher.os, 'execvpe') as executar:
+        assert launcher.iniciar([]) == 7
+        assert launcher.iniciar([], agente=args) == 7
+        assert supervision.call_count == 2
+        executar.assert_not_called()
