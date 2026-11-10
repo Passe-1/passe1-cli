@@ -12,8 +12,8 @@
 +    const args = sandbox
 +      ? ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)(deny file-write*)", shell, "-c", command]
 +      : [shell, "-c", command]
-+    return ChildProcess.make(python, [path.join(root, "passe1_engine", "server_watchdog.py"), "3", ...args], {
-+      cwd, env, stdin: "ignore", detached: true, additionalFds: { fd3: { type: "input" } },
++    return ChildProcess.make(python, [path.join(root, "passe1_engine", "server_watchdog.py"), "0", ...args], {
++      cwd, env, stdin: "pipe", detached: true,
 +    })
 +  }
    if (process.env.PASSE1_SANDBOX_COMMANDS === "1") {

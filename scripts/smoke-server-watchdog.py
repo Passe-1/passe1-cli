@@ -47,9 +47,9 @@ def main():
         with tempfile.TemporaryDirectory() as pasta:
             os.chdir(pasta)
             raiz = Path(pasta)
-            pronto, marcador = raiz / "pronto", raiz / "sobreviveu"
-            codigo = "import os,pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(5); pathlib.Path(sys.argv[2]).touch()"
-            Gateway.comando = " ".join(map(shlex.quote, [sys.executable, "-c", codigo, str(pronto), str(marcador)]))
+            pronto, vivo, marcador = raiz / "pronto", raiz / "vivo", raiz / "sobreviveu"
+            codigo = "import os,pathlib,signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).touch(); time.sleep(1); pathlib.Path(sys.argv[2]).touch(); time.sleep(5); pathlib.Path(sys.argv[3]).touch()"
+            Gateway.comando = " ".join(map(shlex.quote, [sys.executable, "-c", codigo, str(pronto), str(vivo), str(marcador)]))
             os.environ["PASSE1_CONFIG_DIR"] = str(raiz / "config")
             os.environ["PASSE1_BASE_URL"] = f"http://127.0.0.1:{servidor_gateway.server_port}/v1"
             import passe1
@@ -75,10 +75,10 @@ def main():
                 resposta = cliente.post(f"/session/{sessao}/prompt_async", json={"model": {"providerID": "passe1", "modelID": "glm-5.3-flash"}, "parts": [{"type": "text", "text": "Execute a ferramenta do teste."}]})
                 resposta.raise_for_status()
                 limite = time.monotonic() + 45
-                while not pronto.exists() and processo.poll() is None and time.monotonic() < limite:
+                while not vivo.exists() and processo.poll() is None and time.monotonic() < limite:
                     time.sleep(0.05)
-                if not pronto.exists():
-                    raise RuntimeError("Ferramenta não iniciou antes do prazo.")
+                if not pronto.exists() or not vivo.exists():
+                    raise RuntimeError("Ferramenta não permaneceu ativa antes do prazo.")
                 processo.kill()
                 processo.wait(timeout=10)
                 time.sleep(6)
