@@ -37,11 +37,16 @@ with segurar(raiz, timeout=300):
     ambiente["PASSE1_MOVE_ROOT"] = str(Path(journal_temp.name).resolve() / "journals")
     ambiente.update({"PASSE1_BUNDLED_RG": str(rg), "PASSE1_SECURE_PYTHON": sys.executable, "PASSE1_SECURE_ROOT": str(raiz), "OPENCODE_VERSION": match.group(1), "OPENCODE_CHANNEL": "passe1"})
     projeto = fonte / "packages" / "opencode"
-    patch = raiz / "patches" / "opencode-hardlinks.patch"
-    subprocess.run(["git", "apply", "--check", str(patch)], cwd=fonte, check=True)
-    subprocess.run(["git", "apply", str(patch)], cwd=fonte, check=True)
+    patches = [raiz / "patches" / "opencode-hardlinks.patch", raiz / "patches" / "opencode-child-env.patch", raiz / "patches" / "opencode-watchdog.patch"]
+    aplicados = []
     try:
+        for patch in patches:
+            subprocess.run(["git", "apply", "--check", str(patch)], cwd=fonte, check=True)
+            subprocess.run(["git", "apply", str(patch)], cwd=fonte, check=True)
+            aplicados.append(patch)
         subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=fonte, check=True)
+        subprocess.run(["bun", "test", "test/process/process.test.ts", "-t", "remove credenciais do servidor local", "--timeout", "30000"], cwd=fonte / "packages" / "core", check=True, env=ambiente)
+        subprocess.run(["bun", "test", "test/util/process.test.ts", "-t", "não encaminha credenciais", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         if (sistema, arquitetura) == ("windows", "arm64"):
             teste_pty = '''import { spawn } from "bun-pty";
 const pty = spawn("cmd.exe", ["/d", "/c", "echo PASSE1_PTY_OK"], { cols: 80, rows: 24, cwd: process.cwd(), env: process.env });
@@ -56,7 +61,8 @@ pty.onExit((e) => { clearTimeout(timer); if (e.exitCode !== 0 || !saida.includes
         subprocess.run(["bun", "run", "typecheck"], cwd=projeto, check=True)
         subprocess.run(["bun", "run", "script/build.ts", "--single", "--skip-install", "--skip-embed-web-ui"], cwd=projeto, check=True, env=ambiente)
     finally:
-        subprocess.run(["git", "apply", "--reverse", str(patch)], cwd=fonte, check=True)
+        for patch in reversed(aplicados):
+            subprocess.run(["git", "apply", "--reverse", str(patch)], cwd=fonte, check=True)
         journal_temp.cleanup()
     nome = "opencode.exe" if os.name == "nt" else "opencode"
     origem = projeto / "dist" / f"opencode-{sistema}-{arquitetura}" / "bin" / nome

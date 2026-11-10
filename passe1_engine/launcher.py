@@ -196,6 +196,7 @@ def iniciar(argv=None, *, agente=None, tui=False):
     if agente is not None:
         imagens_validadas = passe1._imagens(agente.image or [])
         comando = [str(binario)] + ([] if tui else ["run"]) + ["--pure", "-m", "passe1/" + modelo]
+        id_sessao = None
         if agente.session:
             if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agente.session):
                 print("Nome de sessão inválido.")
@@ -227,6 +228,14 @@ def iniciar(argv=None, *, agente=None, tui=False):
             except (OSError, ValueError, TypeError, KeyError, AttributeError, subprocess.SubprocessError):
                 print("Não foi possível localizar a sessão com segurança.")
                 return 1
+        if tui:
+            from passe1_engine.tui import iniciar as iniciar_tui
+            anexos = []
+            for indice, parte in enumerate(imagens_validadas):
+                url = parte["image_url"]["url"]
+                mime = url.split(";", 1)[0].removeprefix("data:")
+                anexos.append({"type": "file", "mime": mime, "filename": f"imagem-{indice}", "url": url})
+            return iniciar_tui(binario, ambiente, modelo, sessao=id_sessao, imagens=anexos, tarefa=" ".join(agente.tarefa))
         comando.extend(agente.tarefa)
         pasta_imagens = None
         try:
@@ -274,7 +283,8 @@ def iniciar(argv=None, *, agente=None, tui=False):
                     shutil.rmtree(pasta_imagens)
                 except OSError as exc:
                     raise ValueError(f"Não foi possível remover o staging de imagens em {pasta_imagens}; remova-o manualmente.") from exc
-    return _executar_motor([str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
+    from passe1_engine.tui import iniciar as iniciar_tui
+    return iniciar_tui(binario, ambiente, modelo)
 
 
 if __name__ == "__main__":

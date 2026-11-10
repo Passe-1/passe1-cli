@@ -10,19 +10,16 @@ from passe1_engine import launcher
 
 def test_interface_configurada_sem_expor_chave(tmp_path, monkeypatch, capsys):
     capturado = {}
-    def executar(argumentos, ambiente):
-        capturado.update(binario=argumentos[0], argumentos=argumentos, ambiente=ambiente)
-        raise SystemExit(0)
+    def executar(binario, ambiente, modelo):
+        capturado.update(binario=binario, ambiente=ambiente, modelo=modelo)
+        return 0
     monkeypatch.setenv("OPENCODE_CONFIG", "/config/global")
     with patch.object(launcher.Path, 'is_file', return_value=True), \
          patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'glm-5.3-flash', 'tool_call': True}}), \
-         patch.object(launcher, '_executar_motor', side_effect=executar):
-        try:
-            launcher.iniciar([])
-        except SystemExit as exc:
-            assert exc.code == 0
+         patch('passe1_engine.tui.iniciar', side_effect=executar):
+        assert launcher.iniciar([]) == 0
     env = capturado['ambiente']
     config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
     assert config['enabled_providers'] == ['passe1']
@@ -39,7 +36,7 @@ def test_interface_configurada_sem_expor_chave(tmp_path, monkeypatch, capsys):
         assert auth.stat().st_mode & 0o777 == 0o600
     assert 'OPENCODE_CONFIG' not in env
     assert 'sk-passe1-ficticia' not in capsys.readouterr().out
-    assert '--pure' in capturado['argumentos']
+    assert capturado['modelo'] == 'glm-5.3-flash'
 
 
 def test_sem_chave_pede_login_antes_de_iniciar(tmp_path):
@@ -48,7 +45,7 @@ def test_sem_chave_pede_login_antes_de_iniciar(tmp_path):
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'glm-5.3-flash', 'tool_call': True}}), \
          patch.object(launcher.passe1, 'main', return_value=0) as main, \
-         patch.object(launcher, '_executar_motor', side_effect=SystemExit(0)):
+         patch('passe1_engine.tui.iniciar', return_value=0):
         try:
             launcher.iniciar([])
         except SystemExit as exc:
@@ -200,12 +197,11 @@ def test_tui_completa_inicia_sessao_e_prepara_imagem(tmp_path, monkeypatch):
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
          patch.object(launcher.subprocess, 'run', side_effect=respostas), \
-         patch.object(launcher, '_supervision', side_effect=lambda a, env: capturado.update(args=a, imagem=Path(a[a.index('--image') + 1]).read_bytes()) or 0):
-        launcher.iniciar([], agente=args, tui=True)
-    assert 'run' not in capturado['args']
-    assert capturado['args'][capturado['args'].index('--session') + 1] == 'ses_teste'
-    assert capturado['imagem'] == imagem.read_bytes()
-    assert not Path(capturado['args'][capturado['args'].index('--image') + 1]).exists()
+         patch('passe1_engine.tui.iniciar', side_effect=lambda *a, **kw: capturado.update(kw) or 0):
+        assert launcher.iniciar([], agente=args, tui=True) == 0
+    import base64
+    assert capturado['sessao'] == 'ses_teste'
+    assert base64.b64decode(capturado['imagens'][0]['url'].split(',', 1)[1]) == imagem.read_bytes()
 
 
 def test_agent_imagem_e_sessao_em_terminal_usa_tui(monkeypatch):
@@ -230,19 +226,18 @@ def test_tui_anexa_bytes_validados_mesmo_se_origem_mudar(tmp_path, monkeypatch):
         partes = ler_original(caminhos)
         imagem.write_bytes(b'\x89PNG\r\n\x1a\nsubstituida')
         return partes
-    def executar(argumentos, env):
-        caminho = Path(argumentos[argumentos.index('--image') + 1])
-        capturado.update(dados=caminho.read_bytes(), diretorio=caminho.parent)
+    def executar(*args, **kw):
+        import base64
+        capturado['dados'] = base64.b64decode(kw['imagens'][0]['url'].split(',', 1)[1])
         return 0
     with patch.object(launcher.Path, 'is_file', return_value=True), \
          patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
          patch.object(launcher.passe1, '_imagens', side_effect=trocar), \
-         patch.object(launcher, '_supervision', side_effect=executar):
-        launcher.iniciar([], agente=args, tui=True)
+         patch('passe1_engine.tui.iniciar', side_effect=executar):
+        assert launcher.iniciar([], agente=args, tui=True) == 0
     assert capturado['dados'] == validada
-    assert not capturado['diretorio'].exists()
 
 
 def test_agent_nao_interativo_anexa_bytes_validados_se_origem_mudar(tmp_path, monkeypatch):
@@ -396,8 +391,10 @@ def test_windows_inicia_motor_com_supervisor_sem_execvpe(tmp_path, monkeypatch):
          patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
          patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
          patch.object(launcher, '_supervision', return_value=7) as supervision, \
+         patch('passe1_engine.tui.iniciar', return_value=7) as interface, \
          patch.object(launcher.os, 'execvpe') as executar:
         assert launcher.iniciar([]) == 7
         assert launcher.iniciar([], agente=args) == 7
-        assert supervision.call_count == 2
+        interface.assert_called_once()
+        assert supervision.call_count == 1
         executar.assert_not_called()

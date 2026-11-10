@@ -1,0 +1,132 @@
+diff --git a/packages/core/src/cross-spawn-spawner.ts b/packages/core/src/cross-spawn-spawner.ts
+index 6ea9022a..81b6f067 100644
+--- a/packages/core/src/cross-spawn-spawner.ts
++++ b/packages/core/src/cross-spawn-spawner.ts
+@@ -26,6 +26,7 @@ import { PassThrough } from "node:stream"
+ import launch from "cross-spawn"
+ import { makeGlobalNode } from "./effect/app-node"
+ import { filesystem, path } from "./effect/app-node-platform"
++import { childEnv } from "./util/child-env"
+ 
+ const toError = (err: unknown): Error => (err instanceof globalThis.Error ? err : new globalThis.Error(String(err)))
+ 
+@@ -107,7 +108,7 @@ export const make = Effect.gen(function* () {
+   })
+ 
+   const env = (opts: ChildProcess.CommandOptions) =>
+-    opts.extendEnv ? { ...globalThis.process.env, ...opts.env } : opts.env
++    childEnv(opts.extendEnv ? { ...globalThis.process.env, ...opts.env } : opts.env)
+ 
+   const input = (x: ChildProcess.CommandInput | undefined): NodeChildProcess.IOType | undefined =>
+     Stream.isStream(x) ? "pipe" : x
+diff --git a/packages/core/src/pty.ts b/packages/core/src/pty.ts
+index e5be4d4b..823dcef0 100644
+--- a/packages/core/src/pty.ts
++++ b/packages/core/src/pty.ts
+@@ -10,6 +10,7 @@ import { Location } from "./location"
+ import { PtyID } from "./pty/schema"
+ import { Shell } from "./shell"
+ import { lazy } from "./util/lazy"
++import { childEnv } from "./util/child-env"
+ 
+ const BUFFER_LIMIT = 1024 * 1024 * 2
+ // Exited sessions stay observable (status, exit code, retained output) until removed explicitly.
+@@ -167,12 +168,12 @@ const layer = Layer.effect(
+       const command = input.command || Shell.preferred(Config.latest(yield* config.entries(), "shell"))
+       const args = Shell.login(command) ? [...(input.args ?? []), "-l"] : [...(input.args ?? [])]
+       const cwd = input.cwd || location.directory
+-      const env = {
++      const env = childEnv({
+         ...process.env,
+         ...input.env,
+         TERM: "xterm-256color",
+         OPENCODE_TERMINAL: "1",
+-      } as Record<string, string>
++      }) as Record<string, string>
+       if (process.platform === "win32") {
+         env.LC_ALL = "C.UTF-8"
+         env.LC_CTYPE = "C.UTF-8"
+diff --git a/packages/core/src/util/child-env.ts b/packages/core/src/util/child-env.ts
+new file mode 100644
+index 00000000..2f57fff2
+--- /dev/null
++++ b/packages/core/src/util/child-env.ts
+@@ -0,0 +1,8 @@
++/** Não encaminha credenciais do servidor local aos processos filhos. */
++export function childEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
++  const env = { ...source }
++  for (const key of Object.keys(env)) {
++    if (["OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME"].includes(key.toUpperCase())) delete env[key]
++  }
++  return env
++}
+diff --git a/packages/core/test/process/process.test.ts b/packages/core/test/process/process.test.ts
+index 82b6dc47..024fc4c6 100644
+--- a/packages/core/test/process/process.test.ts
++++ b/packages/core/test/process/process.test.ts
+@@ -262,6 +262,23 @@ describe("AppProcess", () => {
+       }),
+     )
+ 
++    it.effect(
++      "remove credenciais do servidor local do ambiente filho",
++      Effect.gen(function* () {
++        const svc = yield* AppProcess.Service
++        const script = "process.stdout.write(JSON.stringify(process.env))"
++        const command = ChildProcess.make(NODE, ["-e", script], {
++          env: { OPENCODE_SERVER_PASSWORD: "senha-de-teste", opencode_server_username: "usuario-de-teste", FEED: "mantido" },
++          extendEnv: true,
++        })
++        const result = yield* svc.run(command)
++        const env = JSON.parse(result.stdout.toString("utf8")) as Record<string, string>
++        expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
++        expect(env.opencode_server_username).toBeUndefined()
++        expect(env.FEED).toBe("mantido")
++      }),
++    )
++
+     it.effect(
+       "carries existing Command options like env",
+       Effect.gen(function* () {
+diff --git a/packages/opencode/src/util/process.ts b/packages/opencode/src/util/process.ts
+index 173210f2..db56eefb 100644
+--- a/packages/opencode/src/util/process.ts
++++ b/packages/opencode/src/util/process.ts
+@@ -3,6 +3,7 @@ import type { Stream } from "node:stream"
+ import launch from "cross-spawn"
+ import { buffer } from "node:stream/consumers"
+ import { errorMessage } from "./error"
++import { childEnv } from "@opencode-ai/core/util/child-env"
+ 
+ export type Stdio = "inherit" | "pipe" | "ignore" | number | Stream
+ export type Shell = boolean | string
+@@ -63,7 +64,7 @@ export function spawn(cmd: string[], opts: Options = {}): Child {
+   const proc = launch(cmd[0], cmd.slice(1), {
+     cwd: opts.cwd,
+     shell: opts.shell,
+-    env: opts.env === null ? {} : opts.env ? { ...process.env, ...opts.env } : undefined,
++    env: childEnv(opts.env === null ? {} : opts.env ? { ...process.env, ...opts.env } : process.env),
+     stdio: [opts.stdin ?? "ignore", opts.stdout ?? "ignore", opts.stderr ?? "ignore"],
+     windowsHide: process.platform === "win32",
+   })
+diff --git a/packages/opencode/test/util/process.test.ts b/packages/opencode/test/util/process.test.ts
+index 934833d1..f209de7e 100644
+--- a/packages/opencode/test/util/process.test.ts
++++ b/packages/opencode/test/util/process.test.ts
+@@ -9,6 +9,16 @@ function node(script: string) {
+ }
+ 
+ describe("util.process", () => {
++  test("não encaminha credenciais do servidor local ao subprocesso", async () => {
++    const out = await Process.run(node("process.stdout.write(JSON.stringify(process.env))"), {
++      env: { OPENCODE_SERVER_PASSWORD: "senha-de-teste", opencode_server_username: "usuario-de-teste", FEED: "mantido" },
++    })
++    const env = JSON.parse(out.stdout.toString()) as Record<string, string>
++    expect(env.OPENCODE_SERVER_PASSWORD).toBeUndefined()
++    expect(env.opencode_server_username).toBeUndefined()
++    expect(env.FEED).toBe("mantido")
++  })
++
+   test("captures stdout and stderr", async () => {
+     const out = await Process.run(node('process.stdout.write("out");process.stderr.write("err")'))
+     expect(out.code).toBe(0)

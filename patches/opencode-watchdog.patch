@@ -1,0 +1,21 @@
+--- a/packages/opencode/src/tool/shell.ts
++++ b/packages/opencode/src/tool/shell.ts
+@@ -291,6 +291,18 @@
+ })
+ 
+ function cmd(shell: string, command: string, cwd: string, env: NodeJS.ProcessEnv) {
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  if (process.platform !== "win32" && python && root) {
++    const sandbox = process.env.PASSE1_SANDBOX_COMMANDS === "1"
++    if (sandbox && process.platform !== "darwin") throw new Error("Sandbox de comandos disponível somente no macOS.")
++    const args = sandbox
++      ? ["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)(deny file-write*)", shell, "-c", command]
++      : [shell, "-c", command]
++    return ChildProcess.make(python, [path.join(root, "passe1_engine", "server_watchdog.py"), "3", ...args], {
++      cwd, env, stdin: "ignore", detached: true, additionalFds: { fd3: { type: "input" } },
++    })
++  }
+   if (process.env.PASSE1_SANDBOX_COMMANDS === "1") {
+     if (process.platform !== "darwin") throw new Error("Sandbox de comandos disponível somente no macOS.")
+     return ChildProcess.make("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)(deny network*)(deny file-write*)", shell, "-c", command], {
