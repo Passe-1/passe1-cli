@@ -1,10 +1,14 @@
 """O wheel contém o motor nativo compilado para a plataforma de build."""
 import os
+import platform
 import sys
 from pathlib import Path
+from runpy import run_path
 
 from setuptools import setup
 from wheel.bdist_wheel import bdist_wheel
+
+tag_macos = run_path("scripts/wheel_tag.py")["tag_macos"]
 
 
 class WheelNativo(bdist_wheel):
@@ -14,6 +18,8 @@ class WheelNativo(bdist_wheel):
 
     def get_tag(self):
         _, _, plataforma = super().get_tag()
+        if sys.platform == "darwin":
+            plataforma = tag_macos(plataforma, platform.machine())
         return "py3", "none", plataforma
 
 

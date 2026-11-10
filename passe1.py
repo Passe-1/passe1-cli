@@ -30,7 +30,7 @@ import httpx
 
 from terminal import seguro as _terminal_seguro
 
-VERSAO = "0.3.0"
+VERSAO = "0.3.1"
 SISTEMA_PADRAO = "Você é o assistente do Passe1. Responda SEMPRE em português do Brasil, de forma clara e direta. Nunca misture idiomas na mesma resposta. Só use outro idioma se a pessoa pedir explicitamente."
 BASE_URL_PADRAO = "https://passe.dehor.com.br/v1"
 PREFIXO_CHAVE = "sk-passe1-"
