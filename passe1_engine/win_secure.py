@@ -72,7 +72,7 @@ def _operar(caminho, anterior, conteudo):
         ios = IO_STATUS_BLOCK()
         # Não compartilhar DELETE impede que ancestrais sejam renomeados durante a operação.
         opcoes = 0x00200000 | 0x20 | (1 if diretorio else 0x40)
-        acesso = 0x100081 if diretorio else (0x80110100 if remover_alvo else 0x40110100)
+        acesso = 0x100081 if diretorio else (0x80110180 if remover_alvo else 0x40110180)
         status = ntdll.NtCreateFile(ctypes.byref(resultado), acesso,
                                    ctypes.byref(atributos), ctypes.byref(ios), None, 0,
                                    1 | 2 if diretorio else 0,
