@@ -91,3 +91,31 @@ def test_journal_fixo_persiste_cifrado_e_impede_renomeacao(tmp_path):
             os.rename(arquivo, arquivo.with_name('trocado'))
     assert arquivo.exists()
     assert b'segredo' not in arquivo.read_bytes()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_par_fixo_confere_identidades_e_impede_trocas(tmp_path):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': vd['arquivo'],
+        'pais_origem': vo['pais'], 'pais_destino': vd['pais'],
+    }
+    for nome, texto in [('origem', 'origem'), ('destino', 'destino'), ('novo', 'novo')]:
+        plano['conteudo_' + nome] = texto
+        plano['hash_' + nome] = win_move._digest(texto)
+    with win_move._par_fixo(origem, destino, plano) as descritores:
+        assert set(descritores) == {'origem', 'destino'}
+        with pytest.raises(OSError):
+            os.rename(origem, origem.with_name('movido'))
+        with pytest.raises(OSError):
+            destino.write_text('ataque', encoding='utf-8')
+    destino.write_text('alterado', encoding='utf-8')
+    with pytest.raises(ValueError, match='Conteúdo mudou'), win_move._par_fixo(origem, destino, plano):
+        pytest.fail('Não deve aceitar arquivo alterado.')
+    assert origem.read_text(encoding='utf-8') == 'origem'

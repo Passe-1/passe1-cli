@@ -10,7 +10,7 @@ import hmac
 import json
 import os
 import secrets
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
 from passe1_engine.win_secure import (
@@ -18,6 +18,7 @@ from passe1_engine.win_secure import (
     _ancorar_journal,
     _dpapi,
     _guardar_journal_ancorado,
+    snapshot_pais,
 )
 from passe1_engine.win_secure import (
     _abrir_journal as _abrir_journal_handle,
@@ -130,3 +131,63 @@ def _journal_fixo(raiz, plano):
             yield arquivo, identidade
         finally:
             os.close(fd)
+
+
+@contextmanager
+def _par_fixo(origem, destino, plano):
+    """Experimento: mantém ambos arquivos aprovados abertos sem compartilhamento."""
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Info
+
+    plano = _validar_journal(plano)
+    caminhos = (Path(os.path.abspath(origem)), Path(os.path.abspath(destino)))
+    if tuple(map(str, caminhos)) != (plano['origem'], plano['destino']):
+        raise ValueError('Caminhos não correspondem ao journal aprovado.')
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    descritores = {}
+    with ExitStack() as pilha:
+        for pai in sorted({c.parent for c in caminhos}, key=lambda p: os.path.normcase(str(p))):
+            pilha.enter_context(_ancorar_journal(pai))
+        for nome, caminho in zip(('origem', 'destino'), caminhos, strict=True):
+            if snapshot_pais(caminho)['pais'] != plano['pais_' + nome]:
+                raise ValueError('Diretório mudou após a aprovação.')
+        for nome, caminho in sorted(zip(('origem', 'destino'), caminhos, strict=True), key=lambda par: os.path.normcase(str(par[1]))):
+            handle = kernel.CreateFileW(str(caminho), 0xC0010080, 0, None, 3, 0x00200000, None)
+            if handle == wintypes.HANDLE(-1).value:
+                raise ctypes.WinError(ctypes.get_last_error())
+            try:
+                informacao = _Info()
+                if not kernel.GetFileInformationByHandle(handle, ctypes.byref(informacao)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                identidade = [str(informacao.volume), str(informacao.index_high), str(informacao.index_low)]
+                if informacao.attributes & (0x400 | 0x10) or informacao.links != 1 or identidade != plano['id_' + nome]:
+                    raise ValueError('Arquivo mudou após a aprovação ou possui links.')
+                fd = msvcrt.open_osfhandle(handle, os.O_RDWR | os.O_BINARY)
+                handle = None
+                pilha.callback(os.close, fd)
+                partes, tamanho = [], 0
+                while parte := os.read(fd, 65536):
+                    tamanho += len(parte)
+                    if tamanho > LIMITE_EDICAO:
+                        raise ValueError('Conteúdo excede o limite de 64 MiB para movimentação.')
+                    partes.append(parte)
+                if not hmac.compare_digest(hashlib.sha256(b''.join(partes)).hexdigest(), plano['hash_' + nome]):
+                    raise ValueError('Conteúdo mudou após a aprovação.')
+                os.lseek(fd, 0, os.SEEK_SET)
+                descritores[nome] = fd
+            finally:
+                if handle is not None:
+                    kernel.CloseHandle(handle)
+        for nome, caminho in zip(('origem', 'destino'), caminhos, strict=True):
+            if snapshot_pais(caminho)['pais'] != plano['pais_' + nome]:
+                raise ValueError('Diretório mudou durante a preparação.')
+        yield descritores
