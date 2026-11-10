@@ -556,3 +556,29 @@ def test_journal_aberto_impede_renomear_ancestrais(tmp_path, monkeypatch):
     finally:
         os.close(fd)
     win_secure._apagar_journal(journal, identidade)
+
+
+def test_edicao_mantem_inode_e_descritor_de_seguranca(tmp_path, monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    from passe1_engine import win_secure
+
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    def descritor():
+        necessario = wintypes.DWORD()
+        advapi.GetFileSecurityW(str(alvo), 7, None, 0, ctypes.byref(necessario))
+        assert necessario.value > 0
+        buffer = ctypes.create_string_buffer(necessario.value)
+        assert advapi.GetFileSecurityW(str(alvo), 7, buffer, len(buffer), ctypes.byref(necessario))
+        return buffer.raw[:necessario.value]
+    antes, inode = descritor(), alvo.stat().st_ino
+    identidade = win_secure.snapshot(alvo)['identidade']
+    win_secure.substituir(alvo, 'antes', 'depois', identidade=identidade)
+    assert alvo.read_text(encoding='utf-8') == 'depois'
+    assert alvo.stat().st_ino == inode
+    assert descritor() == antes
