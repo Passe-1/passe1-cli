@@ -279,3 +279,28 @@ def test_renomeacao_por_handle_nao_sobrescreve_destino(tmp_path):
     assert not origem.exists()
     assert (tmp_path / 'quarentena.txt').read_text(encoding='utf-8') == 'origem'
     assert existente.read_text(encoding='utf-8') == 'não sobrescrever'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': vd['arquivo'],
+        'pais_origem': vo['pais'], 'pais_destino': vd['pais'],
+    }
+    for nome, texto in [('origem', 'origem'), ('destino', 'destino'), ('novo', 'novo')]:
+        plano['conteudo_' + nome] = texto
+        plano['hash_' + nome] = win_move._digest(texto)
+    with win_move._par_fixo(origem, destino, plano) as (descritores, diretorios), win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        win_move._gravar_handle(descritores['destino'], b'novo')
+        win_move._renomear_handle(descritores['origem'], diretorios['origem'], 'quarentena.txt')
+    assert not origem.exists()
+    assert destino.read_text(encoding='utf-8') == 'novo'
+    assert (tmp_path / 'quarentena.txt').read_text(encoding='utf-8') == 'origem'
+    assert journal.exists() and b'origem' not in journal.read_bytes()
