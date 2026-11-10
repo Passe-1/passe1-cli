@@ -209,14 +209,21 @@ index 0f85d44f..807a6953 100644
          )
          let index = 0
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 3f89a639..8ee56c02 100644
+index 3f89a639..655b4e46 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
+@@ -1,5 +1,5 @@
+ import * as path from "path"
+-import { Effect, Schema } from "effect"
++import { Cause, Effect, Schema } from "effect"
+ import * as Tool from "./tool"
+ import { EventV2Bridge } from "@/event-v2-bridge"
+ import { Watcher } from "@opencode-ai/core/filesystem/watcher"
 @@ -7,6 +7,7 @@ import { InstanceState } from "@/effect/instance-state"
  import { Patch } from "../patch"
  import { createTwoFilesPatch, diffLines } from "diff"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { formatarSeguro, gravarSeguro, lerSeguroComVersao, prepararCriacao, removerSeguro, sensitive, verificar, type Identidade } from "./hardlink"
++import { formatarSeguro, gravarSeguro, lerSeguroComVersao, moverSeguro, prepararCriacao, removerSeguro, sensitive, verificar, type Identidade } from "./hardlink"
  import { trimDiff } from "./edit"
  import { LSP } from "@/lsp/lsp"
  import { FSUtil } from "@opencode-ai/core/fs-util"
@@ -325,7 +332,18 @@ index 3f89a639..8ee56c02 100644
                newContent: "",
                type: "delete",
                diff: deleteDiff,
-@@ -202,7 +221,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -190,6 +209,10 @@ export const ApplyPatchTool = Tool.define(
+         }
+       }
+ 
++      if (process.platform === "win32" && fileChanges.some((change) => change.type === "move")) {
++        return yield* Effect.fail(new Error("Movimentação segura ainda não está disponível no Windows; nenhum arquivo foi alterado."))
++      }
++
+       // Build per-file metadata for UI rendering (used for both permission and result)
+       const files = fileChanges.map((change) => ({
+         filePath: change.filePath,
+@@ -202,7 +225,7 @@ export const ApplyPatchTool = Tool.define(
        }))
  
        // Check permissions if needed
@@ -334,11 +352,12 @@ index 3f89a639..8ee56c02 100644
        yield* ctx.ask({
          permission: "edit",
          patterns: relativePaths,
-@@ -216,43 +235,70 @@ export const ApplyPatchTool = Tool.define(
+@@ -216,43 +239,73 @@ export const ApplyPatchTool = Tool.define(
  
        // Apply the changes
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
 +      let formattingSkipped = false
++      const journals: string[] = []
 +      const criados = new Map<string, string[]>()
 +      function diretorios(file: string) {
 +        const result: string[] = []
@@ -367,6 +386,7 @@ index 3f89a639..8ee56c02 100644
 +        for (let i = original.pais.length; i < atual.pais.length && i < dirs.length; i++) criados.set(dirs[i]!, atual.pais[i]!)
 +      }
  
++      const diagnostics = yield* Effect.gen(function* () {
        for (const change of fileChanges) {
 +        yield* verificar(afs, change.filePath)
 +        if (change.movePath) yield* verificar(afs, change.movePath)
@@ -399,9 +419,10 @@ index 3f89a639..8ee56c02 100644
 -              yield* afs.writeWithDirs(change.movePath!, Bom.join(change.newContent, change.bom))
 -              yield* afs.remove(change.filePath)
 +              const identidade = identidadeAtual(change.movePath, change.targetIdentity)
-+              const atual = yield* Effect.promise(() => gravarSeguro(change.movePath!, change.targetPrevious ?? null, content, identidade))
-+              if (change.targetPrevious === null) registrarCriados(change.movePath, change.targetIdentity, atual)
-+              yield* Effect.promise(() => removerSeguro(change.filePath, original, change.oldIdentity ?? null))
++              if (!change.oldIdentity || !identidade) return yield* Effect.fail(new Error("Identidade aprovada ausente para movimentação."))
++              const resultado = yield* Effect.promise(() => moverSeguro(change.filePath, change.movePath!, original, change.targetPrevious ?? null, content, change.oldIdentity!, identidade))
++              journals.push(resultado.journal_display)
++              if (change.targetPrevious === null) registrarCriados(change.movePath, change.targetIdentity, resultado)
                updates.push({ file: change.filePath, event: "unlink" })
                updates.push({ file: change.movePath, event: "add" })
              }
@@ -421,10 +442,26 @@ index 3f89a639..8ee56c02 100644
            yield* events.publish(FileSystem.Event.Edited, { file: edited })
          }
        }
-@@ -282,6 +328,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -268,7 +321,13 @@ export const ApplyPatchTool = Tool.define(
+         const target = change.movePath ?? change.filePath
+         yield* lsp.touchFile(target, "document")
+       }
+-      const diagnostics = yield* lsp.diagnostics()
++      return yield* lsp.diagnostics()
++      }).pipe(Effect.catchCause((cause) => {
++        if (!journals.length) return Effect.failCause(cause)
++        const erro = Cause.squash(cause)
++        const detalhe = erro instanceof Error && erro.message.startsWith("Movimentação segura recusada: Movimentação interrompida; journal preservado em ") ? "\n" + erro.message : ""
++        return Effect.fail(new Error("Patch interrompido após movimentação. Journals preservados para revisão local com passe1 recover-move:\n" + journals.join("\n") + detalhe))
++      }))
+ 
+       // Generate output summary
+       const summaryLines = fileChanges.map((change) => {
+@@ -282,6 +341,8 @@ export const ApplyPatchTool = Tool.define(
          return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
        })
        let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
++      if (journals.length) output += "\nBackups em quarentena foram preservados. Para revisar recuperação, execute em terminal: " + journals.map((journal) => `passe1 recover-move ${journal}`).join(", ")
 +      if (formattingSkipped) output += "\nA formatação automática não foi executada porque sua configuração não pode ser preservada com segurança. Execute o formatador manualmente após aprovar o comando."
  
        for (const change of fileChanges) {
@@ -578,10 +615,10 @@ index 6ea67124..56deaa7f 100644
            let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..628c88cc
+index 00000000..0b90f0dd
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,179 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
@@ -741,6 +778,25 @@ index 00000000..628c88cc
 +  if (status !== 0) throw new Error("Busca segura recusada.")
 +  const items: [string, number, string][] = JSON.parse(json)
 +  return items.map(([path, line, text]) => ({ path, line, text }))
++}
++
++export async function moverSeguro(origem: string, destino: string, anteriorOrigem: string, anteriorDestino: string | null, novo: string, identidadeOrigem: Identidade, identidadeDestino: Identidade) {
++  if (process.platform === "win32") throw new Error("Movimentação segura ainda não está disponível no Windows.")
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  const journalRoot = process.env.PASSE1_MOVE_ROOT
++  if (!python || !root || !journalRoot) throw new Error("Movimentação segura indisponível: helper não configurado.")
++  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_move import _main; sys.exit(_main())"
++  const child = Bun.spawn([python, "-I", "-X", "utf8", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const output = new Response(child.stdout).text()
++  const errors = new Response(child.stderr).text()
++  child.stdin.write(JSON.stringify({ operacao: "mover", origem, destino, anterior_origem: anteriorOrigem, anterior_destino: anteriorDestino, novo, identidade_origem: identidadeOrigem, identidade_destino: identidadeDestino, journal_root: journalRoot }))
++  child.stdin.end()
++  const [json, detail, status] = await Promise.all([output, errors, child.exited])
++  if (status !== 0) throw new Error(detail.trim() || "Movimentação segura recusada.")
++  const resultado: { journal: string; journal_display: string; pais?: string[][] } = JSON.parse(json)
++  if (!resultado.journal || !resultado.journal_display) throw new Error("Journal da movimentação ausente.")
++  return resultado
 +}
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
 index 678ed445..7de2d670 100644
@@ -1040,13 +1096,84 @@ index da6e0f8d..aacfc1b3 100644
 +  { config: cfg },
 +)
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 74203615..6e8f882d 100644
+index 74203615..11543236 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -87,6 +87,76 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
+@@ -87,6 +87,147 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
  const expectReadFailure = (filepath: string) => expectFailure(readText(filepath))
  
  describe("tool.apply_patch freeform", () => {
++  it.instance("Windows recusa lote com move antes de alterar qualquer arquivo", () => Effect.gen(function* () {
++    if (process.platform !== "win32") return
++    const test = yield* TestInstance
++    const origem = path.join(test.directory, "origem.txt")
++    yield* writeText(origem, "origem\n")
++    const { ctx } = makeCtx()
++    const patchText = "*** Begin Patch\n*** Add File: novo.txt\n+novo\n*** Update File: origem.txt\n*** Move to: destino.txt\n@@\n-origem\n+resultado\n*** End Patch"
++    yield* expectFailure(execute({ patchText }, ctx), "nenhum arquivo foi alterado")
++    expect(yield* readText(origem)).toBe("origem\n")
++    yield* expectReadFailure(path.join(test.directory, "novo.txt"))
++  }))
++
++  it.instance("informa journal de move concluído se ação posterior falhar", () => Effect.gen(function* () {
++    if (process.platform === "win32") return
++    const test = yield* TestInstance
++    const origem = path.join(test.directory, "origem.txt")
++    const destino = path.join(test.directory, "destino.txt")
++    const outro = path.join(test.directory, "outro.txt")
++    yield* writeText(origem, "origem\n")
++    yield* writeText(destino, "destino anterior\n")
++    yield* writeText(outro, "antes\n")
++    const ctx = { ...baseCtx, ask: () => Effect.promise(() => fs.writeFile(outro, "modificado por terceiro\n")) }
++    const patchText = "*** Begin Patch\n*** Update File: origem.txt\n*** Move to: destino.txt\n@@\n-origem\n+resultado\n*** Update File: outro.txt\n@@\n-antes\n+depois\n*** End Patch"
++    const resultado = yield* execute({ patchText }, ctx).pipe(Effect.exit)
++    expect(Exit.isFailure(resultado)).toBe(true)
++    if (Exit.isFailure(resultado)) {
++      const mensagem = Cause.pretty(resultado.cause)
++      expect(mensagem).toContain("passe1 recover-move")
++      expect(mensagem).toContain(".passe1-journal-")
++    }
++    expect(yield* readText(outro)).toBe("modificado por terceiro\n")
++    expect(yield* readText(destino)).toBe("resultado\n")
++  }))
++
++  it.instance("move para pasta nova e cria outro arquivo no mesmo lote", () => Effect.gen(function* () {
++    if (process.platform === "win32") return
++    const test = yield* TestInstance
++    const origem = path.join(test.directory, "origem.txt")
++    yield* writeText(origem, "origem\n")
++    const { ctx } = makeCtx()
++    const patchText = "*** Begin Patch\n*** Update File: origem.txt\n*** Move to: novo/movido.txt\n@@\n-origem\n+resultado\n*** Add File: novo/outro.txt\n+outro\n*** End Patch"
++    const resultado = yield* execute({ patchText }, ctx)
++    expect(yield* readText(path.join(test.directory, "novo", "movido.txt"))).toBe("resultado\n")
++    expect(yield* readText(path.join(test.directory, "novo", "outro.txt"))).toBe("outro\n")
++    expect(resultado.output).toContain("passe1 recover-move")
++  }))
++
++  it.instance("move preserva destino se origem mudar após aprovação", () => Effect.gen(function* () {
++    if (process.platform === "win32") return
++    const test = yield* TestInstance
++    const origem = path.join(test.directory, "origem.txt")
++    const destino = path.join(test.directory, "destino.txt")
++    yield* writeText(origem, "origem\n")
++    yield* writeText(destino, "destino anterior\n")
++    const ctx = { ...baseCtx, ask: () => Effect.promise(() => fs.writeFile(origem, "origem mudou\n")) }
++    const patchText = "*** Begin Patch\n*** Update File: origem.txt\n*** Move to: destino.txt\n@@\n-origem\n+resultado\n*** End Patch"
++    yield* expectFailure(execute({ patchText }, ctx))
++    expect(yield* readText(origem)).toBe("origem mudou\n")
++    expect(yield* readText(destino)).toBe("destino anterior\n")
++  }))
++
++  it.instance("recusa aplicar patch em quarentena reservada", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const nome = ".passe1-move-" + "a".repeat(32) + "-origem"
++    const alvo = path.join(test.directory, nome)
++    yield* writeText(alvo, "SEGREDO_QUARENTENA\n")
++    const { ctx } = makeCtx()
++    yield* expectFailure(execute({ patchText: `*** Begin Patch\n*** Update File: ${nome}\n@@\n-SEGREDO_QUARENTENA\n+alterado\n*** End Patch` }, ctx), "Quarentena")
++    expect(yield* readText(alvo)).toBe("SEGREDO_QUARENTENA\n")
++  }))
++
 +  it.instance("cria dois arquivos no mesmo diretório originalmente ausente", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const { ctx } = makeCtx()
@@ -1120,14 +1247,37 @@ index 74203615..6e8f882d 100644
    it.live("requires patchText", () =>
      Effect.gen(function* () {
        const { ctx } = makeCtx()
+@@ -311,10 +452,12 @@ describe("tool.apply_patch freeform", () => {
+       const patchText =
+         "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch"
+ 
+-      yield* execute({ patchText }, ctx)
++      const resultado = yield* execute({ patchText }, ctx)
+ 
+       yield* expectReadFailure(original)
+       expect(yield* readText(destination)).toBe("new\n")
++      expect(resultado.output).toContain("passe1 recover-move")
++      expect(resultado.output).toContain("quarentena")
+     }),
+   )
+ 
 diff --git a/packages/opencode/test/tool/edit.test.ts b/packages/opencode/test/tool/edit.test.ts
-index 46155a50..49c83d81 100644
+index 46155a50..dc851469 100644
 --- a/packages/opencode/test/tool/edit.test.ts
 +++ b/packages/opencode/test/tool/edit.test.ts
-@@ -90,6 +90,38 @@ const onceBus = Effect.fn("EditToolTest.onceBus")(function* (def: typeof Watcher
+@@ -90,6 +90,47 @@ const onceBus = Effect.fn("EditToolTest.onceBus")(function* (def: typeof Watcher
  })
  
  describe("tool.edit", () => {
++  it.instance("recusa edição em quarentena reservada", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const alvo = path.join(test.directory, ".passe1-move-" + "a".repeat(32) + "-origem")
++    yield* Effect.promise(() => Bun.write(alvo, "SEGREDO_QUARENTENA"))
++    const resultado = yield* run({ filePath: alvo, oldString: "SEGREDO", newString: "alterado" }).pipe(Effect.exit)
++    expect(Exit.isFailure(resultado)).toBe(true)
++    expect(yield* Effect.promise(() => fs.readFile(alvo, "utf8"))).toBe("SEGREDO_QUARENTENA")
++  }))
++
 +  it.instance("recusa trocar diretório por outro real após aprovar criação", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const pasta = path.join(test.directory, "pasta")
@@ -1467,7 +1617,7 @@ index a970f85d..ca79b21f 100644
  
  describe("tool.shell truncation", () => {
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index 4f897dc8..66398c66 100644
+index 4f897dc8..e7280e91 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
 @@ -1,6 +1,6 @@
@@ -1478,10 +1628,19 @@ index 4f897dc8..66398c66 100644
  import path from "path"
  import fs from "fs/promises"
  import { WriteTool } from "../../src/tool/write"
-@@ -59,6 +59,62 @@ const run = Effect.fn("WriteToolTest.run")(function* (
+@@ -59,6 +59,71 @@ const run = Effect.fn("WriteToolTest.run")(function* (
  })
  
  describe("tool.write", () => {
++  it.instance("recusa escrita em quarentena reservada", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const alvo = path.join(test.directory, ".passe1-move-" + "a".repeat(32) + "-origem")
++    yield* Effect.promise(() => Bun.write(alvo, "SEGREDO_QUARENTENA"))
++    const resultado = yield* run({ filePath: alvo, content: "alterado" }).pipe(Effect.exit)
++    expect(Exit.isFailure(resultado)).toBe(true)
++    expect(yield* Effect.promise(() => fs.readFile(alvo, "utf8"))).toBe("SEGREDO_QUARENTENA")
++  }))
++
 +  it.instance("recusa trocar diretório por outro real após aprovar criação", () => Effect.gen(function* () {
 +    const test = yield* TestInstance
 +    const pasta = path.join(test.directory, "pasta")
@@ -1541,7 +1700,7 @@ index 4f897dc8..66398c66 100644
    describe("new file creation", () => {
      it.instance("writes content to new file", () =>
        Effect.gen(function* () {
-@@ -159,6 +215,23 @@ describe("tool.write", () => {
+@@ -159,6 +224,23 @@ describe("tool.write", () => {
        },
      )
  

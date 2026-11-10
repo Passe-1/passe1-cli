@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import io
 import datetime
 import getpass
@@ -721,7 +722,9 @@ def _imagens(caminhos: list[str]) -> list[dict]:
             transmitir(caminho, arquivo)
             dados = arquivo.getvalue()
         except (OSError, RuntimeError) as exc:
-            raise ValueError(f"Não consegui ler a imagem: {nome}.") from exc
+            if "salve e feche o editor" in str(exc):
+                raise ValueError("Imagem em uso para escrita; salve e feche o editor antes de tentar novamente.") from exc
+            raise ValueError(f"Não consegui ler a imagem: {_terminal_seguro(nome)}.") from exc
         total += len(dados)
         if total > limite:
             raise ValueError("As imagens ultrapassam o limite total de 4 MiB.")
@@ -734,7 +737,7 @@ def _imagens(caminhos: list[str]) -> list[dict]:
         elif dados.startswith(b"RIFF") and dados[8:12] == b"WEBP":
             mime = "image/webp"
         else:
-            raise ValueError(f"Formato de imagem inválido em {nome}. Use PNG, JPEG, GIF ou WebP.")
+            raise ValueError(f"Formato de imagem inválido em {_terminal_seguro(nome)}. Use PNG, JPEG, GIF ou WebP.")
         codificado = base64.b64encode(dados).decode("ascii")
         partes.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{codificado}"}})
     return partes
@@ -1089,6 +1092,57 @@ def cmd_recover(args: argparse.Namespace) -> int:
     print("Arquivo recuperado.")
     return 0
 
+
+def cmd_recover_move(args: argparse.Namespace) -> int:
+    """Permite revisão local explícita antes de recuperar uma movimentação."""
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        print("A revisão de recuperação exige um terminal interativo.")
+        return 1
+    journal = Path(args.journal)
+    try:
+        if sys.platform == "win32":
+            from passe1_engine import win_move
+            revisao = win_move._revisar_experimental(journal)
+            origem = _terminal_seguro(revisao["origem"]).replace("\n", r"\n")
+            destino = _terminal_seguro(revisao["destino"]).replace("\n", r"\n")
+            bruto_atual = revisao["conteudo_destino_atual"]
+            if len(bruto_atual) + len(revisao["conteudo_destino_anterior"].encode("utf-8")) + len(revisao["conteudo_origem"].encode("utf-8")) > 1024 * 1024:
+                raise ValueError("A prévia integral excede 1 MiB.")
+            atual = bruto_atual.decode("utf-8", errors="backslashreplace")
+            anterior = revisao["conteudo_destino_anterior"]
+            diff = "".join(difflib.unified_diff(atual.splitlines(keepends=True), anterior.splitlines(keepends=True), fromfile="atual: " + destino, tofile="restaurado: " + destino))
+            previa = f"Origem a restaurar: {origem}\n" + _terminal_seguro(revisao["conteudo_origem"]) + "\n" + _terminal_seguro(diff or "(sem alterações no destino)\n")
+            recuperar = win_move._recuperar_experimental
+        elif os.name == "posix":
+            from passe1_engine import secure_move
+            revisao = secure_move.revisar_local(journal)
+            previa = revisao["previa"]
+            recuperar = secure_move.recuperar
+        else:
+            print("Recuperação de movimentação indisponível nesta plataforma.")
+            return 1
+        print("Revise os caminhos e o conteúdo antes de confirmar:")
+        print(previa)
+        print("O journal não garante proteção contra processo malicioso do mesmo usuário.")
+        print("Um pseudoterminal não garante presença humana; outro processo da mesma conta pode simular a confirmação.")
+        confirmacao = input("Restaurar o estado revisado? [s/N] ").strip().lower()
+        if confirmacao not in {"s", "sim"}:
+            print("Recuperação cancelada; quarentenas preservadas.")
+            return 1
+        recuperar(journal, revisao["revisao"], confirmado=True)
+    except (EOFError, KeyboardInterrupt):
+        print("Recuperação cancelada; quarentenas preservadas.")
+        return 1
+    except (OSError, ValueError, RuntimeError) as exc:
+        if "1 MiB" in str(exc):
+            print("A prévia integral excede 1 MiB; recuperação recusada e journal preservado.")
+        else:
+            print("Recuperação recusada ou incompleta; journal e quarentenas preservados para revisão.")
+        return 1
+    print("Recuperação concluída; preserve o journal para revisão e limpeza manual.")
+    return 0
+
+
 def _backup(caminho: Path) -> Path:
     copia = caminho.with_suffix(caminho.suffix + ".bak")
     shutil.copy2(caminho, copia)
@@ -1172,6 +1226,10 @@ def montar_parser() -> argparse.ArgumentParser:
     p_recover = sub.add_parser("recover", help="Recuperar uma edição Windows interrompida.")
     p_recover.add_argument("caminho", help="Arquivo cuja edição foi interrompida.")
     p_recover.set_defaults(func=cmd_recover)
+
+    p_recover_move = sub.add_parser("recover-move", help="Revisar e recuperar uma movimentação interrompida.")
+    p_recover_move.add_argument("journal", help="Diretório do journal da movimentação.")
+    p_recover_move.set_defaults(func=cmd_recover_move)
 
     p_config = sub.add_parser("config", help="Consultar ou configurar o modelo padrão.")
     p_config.add_argument("opcao", choices=["model"])

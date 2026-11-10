@@ -188,6 +188,7 @@ def iniciar(argv=None, *, agente=None, tui=False):
     ambiente["PASSE1_BUNDLED_RG"] = str(Path(__file__).resolve().parent / "bin" / ("rg.exe" if os.name == "nt" else "rg"))
     ambiente["PASSE1_SECURE_PYTHON"] = sys.executable
     ambiente["PASSE1_SECURE_ROOT"] = str(Path(__file__).resolve().parent.parent)
+    ambiente["PASSE1_MOVE_ROOT"] = str(raiz.resolve() / "move-journals")
     ambiente.update({"OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1", "XDG_CONFIG_HOME": str(raiz / "config"), "XDG_DATA_HOME": str(raiz / "data"), "XDG_STATE_HOME": str(raiz / "state"), "XDG_CACHE_HOME": str(raiz / "cache")})
     if agente is not None:
         imagens_validadas = passe1._imagens(agente.image or [])

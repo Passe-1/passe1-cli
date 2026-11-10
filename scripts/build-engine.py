@@ -41,6 +41,7 @@ with segurar(raiz, timeout=300):
     subprocess.run(["git", "apply", "--check", str(patch)], cwd=fonte, check=True)
     subprocess.run(["git", "apply", str(patch)], cwd=fonte, check=True)
     try:
+        subprocess.run(["bun", "test", "test/tool/shell.test.ts", "-t", "streams metadata updates progressively", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         subprocess.run(["bun", "test", "test/tool/read.test.ts", "test/tool/shell.test.ts", "test/tool/grep.test.ts", "test/tool/write.test.ts", "test/tool/edit.test.ts", "test/tool/apply_patch.test.ts", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         subprocess.run(["bun", "test", "test/session/prompt.test.ts", "-t", "sandbox protege shell direto", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         subprocess.run(["bun", "run", "typecheck"], cwd=projeto, check=True)

@@ -1,2 +1,4 @@
 httpx==0.28.1
 pytest==9.1.1
+
+pexpect==4.9.0; sys_platform != "win32"

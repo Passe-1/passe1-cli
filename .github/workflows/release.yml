@@ -51,8 +51,16 @@ jobs:
       - id: winpty_ready
         if: ${{ !cancelled() && runner.os == 'Windows' && steps.installed_wheel.outcome == 'success' }}
         run: python -m pip install pywinpty
+      - if: ${{ !cancelled() && runner.os != 'Windows' && steps.pexpect_ready.outcome == 'success' }}
+        env:
+          PASSE1_TEST_INSTALLED: '1'
+        run: python -m pytest tests/test_recover_move_cli.py -q
+      - if: ${{ !cancelled() && runner.os != 'Windows' && steps.pexpect_ready.outcome == 'success' }}
+        run: python scripts/smoke-move-recovery.py
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -m pytest tests/test_recuperacao_wheel.py -q
+      - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
+        run: python -m pytest tests/test_win_move_wheel.py -q
       - if: ${{ !cancelled() && runner.os == 'Windows' && steps.winpty_ready.outcome == 'success' }}
         run: python -m pytest tests/test_win_image_wheel.py -q
       - if: ${{ !cancelled() && (steps.pexpect_ready.outcome == 'success' || steps.winpty_ready.outcome == 'success') }}

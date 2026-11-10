@@ -20,6 +20,8 @@ from pathlib import Path
 import arquivos_seguros
 import terminal
 
+LIMITE_MOVE_REVISAVEL = 1024 * 1024
+
 _REVISOES = {}
 
 
@@ -133,7 +135,24 @@ def _abrir_journal(raiz, criar=False):
     return arquivos_seguros._pai(Path(raiz.anchor), raiz / '.entrada', criar=criar)
 
 
-def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):
+
+def preparar_raiz(journal_root):
+    """Cria ou valida diretório privado sem seguir links."""
+    raiz = Path(os.path.abspath(journal_root))
+    with arquivos_seguros._pai(Path(raiz.anchor), raiz) as (pai, nome, _):
+        try:
+            os.mkdir(nome, 0o700, dir_fd=pai)
+            os.fsync(pai)
+        except FileExistsError:
+            pass
+        fd = os.open(nome, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=pai)
+        try:
+            _privado(fd)
+        finally:
+            os.close(fd)
+    return raiz
+
+def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root, *, retornar_estado=False):
     """Move com journal recuperável, mantendo cópias de quarentena após sucesso.
 
     Retorna o caminho do journal. A remoção definitiva das quarentenas exige
@@ -141,10 +160,14 @@ def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_o
     """
     arquivos_seguros._disponivel()
     origem, destino, journal_root = (Path(os.path.abspath(p)) for p in (origem, destino, journal_root))
-    if origem == destino or not isinstance(anterior_origem, str) or not isinstance(anterior_destino, str) or not isinstance(novo, str):
+    if origem == destino or not isinstance(anterior_origem, str) or not (anterior_destino is None or isinstance(anterior_destino, str)) or not isinstance(novo, str):
         raise ValueError('Origem, destino ou conteúdo inválido.')
+    if sum(len(texto.encode('utf-8')) for texto in (anterior_origem, anterior_destino, novo) if texto is not None) > LIMITE_MOVE_REVISAVEL:
+        raise ValueError('Move exige recuperação revisável; conteúdo total excede 1 MiB. Nenhum arquivo foi alterado.')
     vo = _verificar(origem, anterior_origem, identidade_origem)
-    vd = _verificar(destino, anterior_destino, identidade_destino)
+    vd = _verificar(destino, anterior_destino, identidade_destino) if anterior_destino is not None else None
+    if anterior_destino is None and (not isinstance(identidade_destino, dict) or not isinstance(identidade_destino.get('pais'), list) or not identidade_destino['pais']):
+        raise ValueError('Identidade dos diretórios do destino é obrigatória.')
     token = secrets.token_hex(16)
     hold_o = '.passe1-move-' + token + '-origem'
     hold_d = '.passe1-move-' + token + '-destino'
@@ -156,13 +179,18 @@ def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_o
         os.fsync(jroot)
         try:
             _privado(jfd)
-            with arquivos_seguros._pai(Path(origem.anchor), origem) as (of, on, op), arquivos_seguros._pai(Path(destino.anchor), destino) as (df, dn, dp):
-                if op != vo.pais or dp != vd.pais:
+            with arquivos_seguros._pai(Path(origem.anchor), origem) as (of, on, op), arquivos_seguros._pai(
+                Path(destino.anchor), destino, criar=vd is None,
+                esperados=identidade_destino['pais'] if vd is None else None,
+            ) as (df, dn, dp):
+                if op != vo.pais or (vd is not None and dp != vd.pais):
                     raise ValueError('Diretório mudou após a aprovação.')
                 o, d = _estat(of, on), _estat(df, dn)
-                if o is None or d is None or arquivos_seguros._estado(o) != vo.arquivo or arquivos_seguros._estado(d) != vd.arquivo:
-                    raise ValueError('Arquivo mudou após a aprovação.')
-                dados = {'versao': 2, 'origem': str(origem), 'destino': str(destino), 'hold_origem': hold_o, 'hold_destino': hold_d, 'id_qo': None, 'id_qd': None, 'id_origem': _id(o), 'id_destino': _id(d), 'id_novo': None, 'hash_origem': hashlib.sha256(anterior_origem.encode()).hexdigest(), 'hash_destino': hashlib.sha256(anterior_destino.encode()).hexdigest(), 'hash_novo': hashlib.sha256(novo.encode()).hexdigest(), 'pais_origem': identidade_origem['pais'], 'pais_destino': identidade_destino['pais'], 'fase': 'preparando'}
+                if o is None or arquivos_seguros._estado(o) != vo.arquivo:
+                    raise ValueError('Origem mudou após a aprovação.')
+                if (vd is None and d is not None) or (vd is not None and (d is None or arquivos_seguros._estado(d) != vd.arquivo)):
+                    raise ValueError('Destino mudou após a aprovação.')
+                dados = {'versao': 2, 'origem': str(origem), 'destino': str(destino), 'hold_origem': hold_o, 'hold_destino': hold_d, 'id_qo': None, 'id_qd': None, 'id_origem': _id(o), 'id_destino': _id(d) if d else None, 'destino_ausente': vd is None, 'id_novo': None, 'hash_origem': hashlib.sha256(anterior_origem.encode()).hexdigest(), 'hash_destino': hashlib.sha256(anterior_destino.encode()).hexdigest() if anterior_destino is not None else None, 'hash_novo': hashlib.sha256(novo.encode()).hexdigest(), 'pais_origem': identidade_origem['pais'], 'pais_destino': [[str(valor) for valor in item] for item in dp], 'fase': 'preparando'}
                 _manifesto(jfd, dados)
                 qof = qdf = None
                 try:
@@ -171,14 +199,15 @@ def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_o
                     os.fsync(of)
                     os.fsync(df)
                     _manifesto(jfd, dados)
-                    staged = os.open('novo', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=qdf)
+                    staged = os.open('novo', os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600 if vd is not None else 0o666, dir_fd=qdf)
                     try:
                         arquivos_seguros._gravar(staged, novo)
-                        original_d, _ = arquivos_seguros._abrir_arquivo(df, dn)
-                        try:
-                            arquivos_seguros._copiar_metadados(original_d, staged)
-                        finally:
-                            os.close(original_d)
+                        if vd is not None:
+                            original_d, _ = arquivos_seguros._abrir_arquivo(df, dn)
+                            try:
+                                arquivos_seguros._copiar_metadados(original_d, staged)
+                            finally:
+                                os.close(original_d)
                         os.fsync(staged)
                         dados['id_novo'] = _id(os.fstat(staged))
                     finally:
@@ -194,14 +223,15 @@ def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_o
                     guardado, id_guardado = _ler_guardado(qof, 'origem')
                     if id_guardado != dados['id_origem'] or guardado != anterior_origem:
                         raise ValueError('Origem mudou durante a movimentação.')
-                    _exclusivo(df, dn, qdf, 'destino')
-                    os.fsync(df)
-                    os.fsync(qdf)
-                    dados['fase'] = 'destino_guardado'
-                    _manifesto(jfd, dados)
-                    guardado, id_guardado = _ler_guardado(qdf, 'destino')
-                    if id_guardado != dados['id_destino'] or guardado != anterior_destino:
-                        raise ValueError('Destino mudou durante a movimentação.')
+                    if vd is not None:
+                        _exclusivo(df, dn, qdf, 'destino')
+                        os.fsync(df)
+                        os.fsync(qdf)
+                        dados['fase'] = 'destino_guardado'
+                        _manifesto(jfd, dados)
+                        guardado, id_guardado = _ler_guardado(qdf, 'destino')
+                        if id_guardado != dados['id_destino'] or guardado != anterior_destino:
+                            raise ValueError('Destino mudou durante a movimentação.')
                     _exclusivo(qdf, 'novo', df, dn)
                     os.fsync(qdf)
                     os.fsync(df)
@@ -211,7 +241,10 @@ def mover(origem, destino, anterior_origem, anterior_destino, novo, identidade_o
                         raise ValueError('Arquivo publicado mudou durante a movimentação.')
                     dados['fase'] = 'aplicado'
                     _manifesto(jfd, dados)
-                    return journal_root / nome_journal
+                    caminho_journal = journal_root / nome_journal
+                    if retornar_estado:
+                        return {'journal': str(caminho_journal), 'pais': [[str(valor) for valor in item] for item in dp]}
+                    return caminho_journal
                 finally:
                     if qdf is not None:
                         os.close(qdf)
@@ -254,6 +287,9 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
     origem, destino = Path(dados['origem']), Path(dados['destino'])
     if not origem.is_absolute() or not destino.is_absolute():
         raise ValueError('Journal inválido.')
+    destino_ausente = dados.get('destino_ausente', False)
+    if not isinstance(destino_ausente, bool) or (destino_ausente and (dados.get('id_destino') is not None or dados.get('hash_destino') is not None)):
+        raise ValueError('Journal inválido.')
     token = journal.name.removeprefix('.passe1-journal-')
     if dados.get('hold_origem') != '.passe1-move-' + token + '-origem' or dados.get('hold_destino') != '.passe1-move-' + token + '-destino':
         raise ValueError('Journal inválido.')
@@ -268,7 +304,13 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
             raise ValueError('Diretório mudou; recuperação recusada.')
         if dados['id_qo'] is None or dados['id_qd'] is None:
             if dados.get('fase') == 'preparando':
-                for caminho, conteudo_hash, id_esperado in ((origem, dados['hash_origem'], dados['id_origem']), (destino, dados['hash_destino'], dados['id_destino'])):
+                originais = [(origem, dados['hash_origem'], dados['id_origem'])]
+                if destino_ausente:
+                    if _estat(df, dn) is not None:
+                        raise ValueError('Destino foi criado por terceiro; recuperação recusada.')
+                else:
+                    originais.append((destino, dados['hash_destino'], dados['id_destino']))
+                for caminho, conteudo_hash, id_esperado in originais:
                     texto, versao = arquivos_seguros.ler(Path(caminho.anchor), caminho)
                     if [str(v) for v in versao.arquivo[:2]] != id_esperado or hashlib.sha256(texto.encode()).hexdigest() != conteudo_hash:
                         raise ValueError('Arquivo mudou; recuperação recusada.')
@@ -291,6 +333,8 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
                 texto_origem_guardado = None
                 hold_d = _estat(qdf, 'destino')
                 hold_o = _estat(qof, 'origem')
+                if hold_d is not None and destino_ausente:
+                    raise ValueError('Destino inesperado na quarentena; recuperação recusada.')
                 if hold_d is not None:
                     conteudo, identidade = _ler_guardado(qdf, 'destino')
                     if identidade != dados['id_destino'] or hashlib.sha256(conteudo.encode()).hexdigest() != dados['hash_destino']:
@@ -303,11 +347,13 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
                     texto_origem_guardado = conteudo
                 if hold_o is not None and _estat(of, on) is not None:
                     raise ValueError('Origem foi alterada; recuperação recusada.')
-                if hold_d is not None and atual is not None:
+                if (hold_d is not None or destino_ausente) and atual is not None:
                     texto, versao = arquivos_seguros.ler(Path(destino.anchor), destino)
                     if _id(atual) != dados['id_novo'] or [str(v) for v in versao.arquivo[:2]] != dados['id_novo'] or hashlib.sha256(texto.encode()).hexdigest() != dados['hash_novo']:
                         raise ValueError('Destino foi alterado; recuperação recusada.')
                     texto_destino_atual = texto
+                    if destino_ausente:
+                        texto_destino_guardado = ''
                 original = _estat(of, on)
                 if hold_o is None:
                     if original is None:
@@ -315,20 +361,20 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
                     texto, versao = arquivos_seguros.ler(Path(origem.anchor), origem)
                     if _id(original) != dados['id_origem'] or [str(v) for v in versao.arquivo[:2]] != dados['id_origem'] or hashlib.sha256(texto.encode()).hexdigest() != dados['hash_origem']:
                         raise ValueError('Origem mudou; recuperação recusada.')
-                if hold_d is None:
+                if hold_d is None and not destino_ausente:
                     if atual is None:
                         raise ValueError('Destino ausente; recuperação recusada.')
                     texto, versao = arquivos_seguros.ler(Path(destino.anchor), destino)
                     if _id(atual) != dados['id_destino'] or [str(v) for v in versao.arquivo[:2]] != dados['id_destino'] or hashlib.sha256(texto.encode()).hexdigest() != dados['hash_destino']:
                         raise ValueError('Destino mudou; recuperação recusada.')
                 acoes = []
-                if hold_d is not None and atual is not None:
+                if (hold_d is not None or destino_ausente) and atual is not None:
                     acoes.append({'acao': 'guardar_resultado', 'origem': str(destino), 'destino': str(destino.parent / dados['hold_destino'] / 'novo')})
                 if hold_d is not None:
                     acoes.append({'acao': 'restaurar_destino', 'origem': str(destino.parent / dados['hold_destino'] / 'destino'), 'destino': str(destino)})
                 if hold_o is not None:
                     acoes.append({'acao': 'restaurar_origem', 'origem': str(origem.parent / dados['hold_origem'] / 'origem'), 'destino': str(origem)})
-                base.update({'acoes': acoes, 'id_qo': dados['id_qo'], 'id_qd': dados['id_qd'],
+                base.update({'acoes': acoes, 'destino_ausente': destino_ausente, 'id_qo': dados['id_qo'], 'id_qd': dados['id_qd'],
                              'estado_origem': [str(v) for v in arquivos_seguros._estado(original)] if original else None,
                              'estado_destino': [str(v) for v in arquivos_seguros._estado(atual)] if atual else None,
                              'estado_backup_origem': [str(v) for v in arquivos_seguros._estado(hold_o)] if hold_o else None,
@@ -341,10 +387,12 @@ def _inspecionar(journal, *, executar=False, revisao=None, incluir_previa=False)
                     return resultado
                 if revisao != codigo:
                     raise ValueError('Estado mudou após a revisão; revise novamente.')
+                if (hold_d is not None or destino_ausente) and atual is not None:
+                    _exclusivo(df, dn, qdf, 'novo')
+                    _confirmar_movido(qdf, 'novo', dados['id_novo'], dados['hash_novo'], journal)
+                    os.fsync(qdf)
+                    os.fsync(df)
                 if hold_d is not None:
-                    if atual is not None:
-                        _exclusivo(df, dn, qdf, 'novo')
-                        _confirmar_movido(qdf, 'novo', dados['id_novo'], dados['hash_novo'], journal)
                     _exclusivo(qdf, 'destino', df, dn)
                     _confirmar_movido(df, dn, dados['id_destino'], dados['hash_destino'], journal, quarentena=qdf)
                     os.fsync(qdf)
@@ -456,17 +504,20 @@ def _main():
         if entrada.get('operacao') == 'recuperar':
             raise ValueError('Recuperação disponível somente no comando local com revisão e confirmação.')
         if entrada.get('operacao') == 'mover':
+            preparar_raiz(entrada['journal_root'])
             resultado = mover(
                 entrada['origem'], entrada['destino'], entrada['anterior_origem'],
                 entrada['anterior_destino'], entrada['novo'], entrada['identidade_origem'],
-                entrada['identidade_destino'], entrada['journal_root'],
+                entrada['identidade_destino'], entrada['journal_root'], retornar_estado=True,
             )
         else:
             raise ValueError('Operação inválida.')
-        journal = resultado['journal'] if isinstance(resultado, dict) else str(resultado)
-        json.dump({'journal': journal, 'quarentena_mantida': True}, sys.stdout)
+        estado = resultado if isinstance(resultado, dict) else {'journal': str(resultado)}
+        exibicao = terminal.seguro(str(estado['journal'])).replace('\n', r'\n')
+        json.dump({**estado, 'journal_display': exibicao, 'quarentena_mantida': True}, sys.stdout)
     except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
-        print(f'Movimentação segura recusada: {exc}', file=sys.stderr)
+        detalhe = terminal.seguro(str(exc)).replace('\n', r'\n')
+        print(f'Movimentação segura recusada: {detalhe}', file=sys.stderr)
         return 1
     return 0
 

@@ -569,7 +569,7 @@ def test_token_nao_pode_ser_derivado_da_revisao_sem_previa_local(tmp_path):
     assert not origem.exists() and destino.read_text() == 'resultado\n'
 
 
-def test_previa_inteira_e_obrigatoria_antes_da_confirmacao(tmp_path):
+def test_previa_inteira_e_obrigatoria_antes_da_confirmacao(tmp_path, monkeypatch):
     origem = tmp_path / 'origem'
     destino = tmp_path / 'destino'
     journal_root = tmp_path / 'journals'
@@ -579,6 +579,8 @@ def test_previa_inteira_e_obrigatoria_antes_da_confirmacao(tmp_path):
     destino.write_text('antes')
     vo = secure_stream.transmitir(origem, io.BytesIO())
     vd = secure_stream.transmitir(destino, io.BytesIO())
+    # Simula journal legado criado antes do limite de preflight.
+    monkeypatch.setattr(secure_move, 'LIMITE_MOVE_REVISAVEL', 2 * 1024 * 1024)
     journal = secure_move.mover(origem, destino, original, 'antes', 'novo', vo, vd, journal_root)
     with pytest.raises(ValueError, match='revisão integral'):
         secure_move.revisar_local(journal)
@@ -681,3 +683,208 @@ def test_symlink_instalado_por_troca_volta_a_quarentena_sem_seguir(tmp_path, mon
     assert externo.read_text() == 'não tocar'
     assert backup.with_name('destino-real').read_text() == 'destino aprovado\n'
     assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
+
+
+def preparar_destino_ausente(tmp_path, *, aninhado=False):
+    from passe1_engine import secure_write
+    origem = tmp_path / 'origem'
+    destino = tmp_path / 'novo' / 'sub' / 'destino' if aninhado else tmp_path / 'destino'
+    journal = tmp_path / 'journals'
+    journal.mkdir(mode=0o700)
+    origem.write_text('origem aprovada\n')
+    return origem, destino, journal, secure_stream.transmitir(origem, io.BytesIO()), secure_write.preparar_criacao(destino)
+
+
+def executar_destino_ausente(dados):
+    origem, destino, journal, vo, vd = dados
+    return secure_move.mover(origem, destino, 'origem aprovada\n', None, 'resultado\n', vo, vd, journal)
+
+
+def test_move_para_destino_ausente_e_recuperacao_confirmada(tmp_path):
+    dados = preparar_destino_ausente(tmp_path)
+    origem, destino, _, *_ = dados
+    journal = executar_destino_ausente(dados)
+    assert not origem.exists() and destino.read_text() == 'resultado\n'
+    plano = secure_move.revisar_local(journal)
+    assert plano['destino_ausente'] is True
+    assert [acao['acao'] for acao in plano['acoes']] == ['guardar_resultado', 'restaurar_origem']
+    assert '-resultado' in plano['previa'] and '+origem aprovada' in plano['previa']
+    secure_move.recuperar(journal, plano['revisao'], confirmado=True)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+
+
+def test_move_para_destino_ausente_cria_pais_e_permite_recuperacao(tmp_path):
+    dados = preparar_destino_ausente(tmp_path, aninhado=True)
+    origem, destino, _, *_ = dados
+    assert not destino.parent.exists()
+    journal = executar_destino_ausente(dados)
+    assert destino.read_text() == 'resultado\n'
+    recuperar_confirmado(journal)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+
+
+def test_terceiro_cria_destino_antes_de_mover_sem_sobrescrita(tmp_path):
+    dados = preparar_destino_ausente(tmp_path)
+    origem, destino, _, *_ = dados
+    destino.write_text('terceiro')
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        executar_destino_ausente(dados)
+    assert origem.read_text() == 'origem aprovada\n' and destino.read_text() == 'terceiro'
+
+
+def test_terceiro_insere_destino_na_publicacao_sem_sobrescrita(tmp_path, monkeypatch):
+    dados = preparar_destino_ausente(tmp_path)
+    origem, destino, journal_root, *_ = dados
+    original = secure_move._exclusivo
+    chamadas = []
+    def inserir(*args):
+        chamadas.append(True)
+        if len(chamadas) == 2:
+            destino.write_text('terceiro')
+        return original(*args)
+    monkeypatch.setattr(secure_move, '_exclusivo', inserir)
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        executar_destino_ausente(dados)
+    assert not origem.exists() and destino.read_text() == 'terceiro'
+    (journal,) = journal_root.iterdir()
+    manifesto = json.loads((journal / 'manifesto.json').read_text())
+    assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
+    with pytest.raises(ValueError, match='Destino foi alterado'):
+        secure_move.revisar_local(journal)
+    assert destino.read_text() == 'terceiro'
+    destino.rename(tmp_path / 'terceiro-preservado')
+    recuperar_confirmado(journal)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+    assert (tmp_path / 'terceiro-preservado').read_text() == 'terceiro'
+
+
+def test_falha_depois_de_publicar_destino_ausente_tem_recuperacao(tmp_path, monkeypatch):
+    dados = preparar_destino_ausente(tmp_path)
+    origem, destino, journal_root, *_ = dados
+    original = secure_move._manifesto
+    def falhar(fd, info):
+        if info.get('fase') == 'aplicado':
+            raise OSError('falha simulada')
+        return original(fd, info)
+    monkeypatch.setattr(secure_move, '_manifesto', falhar)
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        executar_destino_ausente(dados)
+    assert not origem.exists() and destino.read_text() == 'resultado\n'
+    (journal,) = journal_root.iterdir()
+    recuperar_confirmado(journal)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+
+
+def test_crash_depois_de_publicar_destino_ausente_tem_recuperacao(tmp_path):
+    origem, destino, journal_root, vo, vd = preparar_destino_ausente(tmp_path)
+    codigo = '''
+import json, os, sys
+from passe1_engine import secure_move
+original = secure_move._manifesto
+def interromper(fd, dados):
+    if dados.get('fase') == 'aplicado':
+        os._exit(91)
+    original(fd, dados)
+secure_move._manifesto = interromper
+secure_move.mover(sys.argv[1], sys.argv[2], 'origem aprovada\\n', None, 'resultado\\n', json.loads(sys.argv[3]), json.loads(sys.argv[4]), sys.argv[5])
+'''
+    processo = subprocess.run([sys.executable, '-c', codigo, str(origem), str(destino), json.dumps(vo), json.dumps(vd), str(journal_root)], cwd=Path(__file__).resolve().parents[1], check=False)
+    assert processo.returncode == 91
+    assert not origem.exists() and destino.read_text() == 'resultado\n'
+    (journal,) = journal_root.iterdir()
+    recuperar_confirmado(journal)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+
+
+def test_troca_de_diretorio_do_destino_ausente_recusa_sem_perda(tmp_path):
+    from passe1_engine import secure_write
+    origem = tmp_path / 'origem'
+    origem.write_text('origem aprovada\n')
+    pasta = tmp_path / 'pasta'
+    pasta.mkdir()
+    destino = pasta / 'destino'
+    journal_root = tmp_path / 'journals'
+    journal_root.mkdir(mode=0o700)
+    vo = secure_stream.transmitir(origem, io.BytesIO())
+    vd = secure_write.preparar_criacao(destino)
+    pasta.rename(tmp_path / 'pasta-original')
+    pasta.mkdir()
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        secure_move.mover(origem, destino, 'origem aprovada\n', None, 'resultado\n', vo, vd, journal_root)
+    assert origem.read_text() == 'origem aprovada\n' and not destino.exists()
+
+
+def test_move_e_criacao_posterior_reutilizam_pais_do_proprio_lote(tmp_path):
+    from passe1_engine import secure_write
+    origem, destino, journal_root, vo, vd = preparar_destino_ausente(tmp_path, aninhado=True)
+    outro = destino.parent / 'outro'
+    identidade_outro = secure_write.preparar_criacao(outro)
+    resultado = secure_move.mover(origem, destino, 'origem aprovada\n', None, 'resultado\n', vo, vd, journal_root, retornar_estado=True)
+    assert len(resultado['pais']) > len(identidade_outro['pais'])
+    secure_write.substituir(outro, None, 'segundo', {'pais': resultado['pais']})
+    assert destino.read_text() == 'resultado\n'
+    assert outro.read_text() == 'segundo'
+    assert Path(resultado['journal']).exists()
+
+
+def test_pais_reutilizados_recusam_diretorio_trocado_entre_operacoes(tmp_path):
+    from passe1_engine import secure_write
+    origem, destino, journal_root, vo, vd = preparar_destino_ausente(tmp_path, aninhado=True)
+    outro = destino.parent / 'outro'
+    resultado = secure_move.mover(origem, destino, 'origem aprovada\n', None, 'resultado\n', vo, vd, journal_root, retornar_estado=True)
+    pasta = destino.parent
+    pasta.rename(pasta.with_name('original'))
+    pasta.mkdir()
+    with pytest.raises(ValueError, match='Diretório mudou'):
+        secure_write.substituir(outro, None, 'segundo', {'pais': resultado['pais']})
+    assert not outro.exists()
+    assert (pasta.with_name('original') / 'destino').read_text() == 'resultado\n'
+
+
+def test_protocolo_move_retorna_journal_e_identidades_dos_pais(tmp_path):
+    origem, destino, journal_root, vo, vd = preparar_destino_ausente(tmp_path, aninhado=True)
+    entrada = {'operacao': 'mover', 'origem': str(origem), 'destino': str(destino), 'anterior_origem': 'origem aprovada\n',
+               'anterior_destino': None, 'novo': 'resultado\n', 'identidade_origem': vo, 'identidade_destino': vd,
+               'journal_root': str(journal_root)}
+    processo = subprocess.run([sys.executable, '-m', 'passe1_engine.secure_move'], input=json.dumps(entrada), text=True,
+                              capture_output=True, cwd=Path(__file__).resolve().parents[1], check=False)
+    assert processo.returncode == 0, processo.stderr
+    resultado = json.loads(processo.stdout)
+    assert Path(resultado['journal']).exists() and resultado['quarentena_mantida'] is True
+    assert len(resultado['pais']) > len(vd['pais'])
+    assert all(all(isinstance(valor, str) for valor in par) for par in resultado['pais'])
+
+
+def test_symlink_insere_destino_ausente_sem_seguir_ou_alterar_terceiro(tmp_path, monkeypatch):
+    dados = preparar_destino_ausente(tmp_path)
+    origem, destino, journal_root, *_ = dados
+    externo = tmp_path / 'externo'
+    externo.write_text('preservado')
+    original = secure_move._exclusivo
+    chamadas = []
+    def inserir(*args):
+        chamadas.append(True)
+        if len(chamadas) == 2:
+            destino.symlink_to(externo)
+        return original(*args)
+    monkeypatch.setattr(secure_move, '_exclusivo', inserir)
+    with pytest.raises(RuntimeError, match='journal preservado'):
+        executar_destino_ausente(dados)
+    assert destino.is_symlink() and externo.read_text() == 'preservado'
+    (journal,) = journal_root.iterdir()
+    manifesto = json.loads((journal / 'manifesto.json').read_text())
+    assert (origem.parent / manifesto['hold_origem'] / 'origem').read_text() == 'origem aprovada\n'
+    with pytest.raises(ValueError):
+        secure_move.revisar_local(journal)
+    assert externo.read_text() == 'preservado'
+
+
+def test_move_recusa_conteudo_excessivo_antes_de_alterar_arquivos(tmp_path):
+    dados = preparar(tmp_path)
+    origem, destino, journal, id_origem, id_destino = dados
+    grande = 'x' * (1024 * 1024)
+    with pytest.raises(ValueError, match='excede 1 MiB'):
+        secure_move.mover(origem, destino, origem.read_text(), destino.read_text(), grande, id_origem, id_destino, journal)
+    assert origem.read_text() == 'origem aprovada\n'
+    assert destino.read_text() == 'destino aprovado\n'
+    assert not list(journal.iterdir())
