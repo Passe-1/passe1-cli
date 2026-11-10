@@ -1,10 +1,14 @@
 """O wheel contém o motor nativo compilado para a plataforma de build."""
 import os
+import platform
 import sys
 from pathlib import Path
+from runpy import run_path
 
 from setuptools import setup
 from wheel.bdist_wheel import bdist_wheel
+
+ferramentas_tag = run_path("scripts/wheel_tag.py")
 
 
 class WheelNativo(bdist_wheel):
@@ -14,6 +18,10 @@ class WheelNativo(bdist_wheel):
 
     def get_tag(self):
         _, _, plataforma = super().get_tag()
+        if sys.platform == "darwin":
+            binarios = Path("passe1_engine/bin")
+            minimos = [ferramentas_tag["minimo_binario"](binarios / nome) for nome in ("opencode", "rg")]
+            plataforma = ferramentas_tag["tag_macos"](plataforma, platform.machine(), minimos)
         return "py3", "none", plataforma
 
 
