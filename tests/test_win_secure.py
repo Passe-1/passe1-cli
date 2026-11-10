@@ -280,3 +280,65 @@ def test_rename_proprio_nao_quebra_oplock(tmp_path):
         for handle in (novo, diretorio, evento):
             k.CloseHandle(handle)
     assert alvo.read_text(encoding='utf-8') == 'depois'
+
+
+def test_editar_preserva_conteudo_e_permissoes_basicas(tmp_path):
+    from passe1_engine.win_secure import substituir
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    antes = alvo.stat()
+    substituir(alvo, 'antes', 'depois')
+    depois = alvo.stat()
+    assert alvo.read_text(encoding='utf-8') == 'depois'
+    assert depois.st_mode == antes.st_mode
+
+
+def test_editar_recusa_versao_divergente(tmp_path):
+    from passe1_engine.win_secure import substituir
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('original', encoding='utf-8')
+    with pytest.raises(ValueError):
+        substituir(alvo, 'versão antiga', 'novo')
+    assert alvo.read_text(encoding='utf-8') == 'original'
+
+
+def test_backup_criptografado_nao_contem_texto_claro(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal = win_secure._guardar_journal(tmp_path / 'alvo.txt', 'segredo de teste', (1, 2, 3))
+    try:
+        assert b'segredo de teste' not in journal.read_bytes()
+        dados = win_secure._ler_journal(journal)
+        assert dados['conteudo'] == 'segredo de teste'
+        assert dados['identidade'] == [1, 2, 3]
+    finally:
+        journal.unlink(missing_ok=True)
+
+
+def test_recupera_journal_apos_encerramento_durante_escrita(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('conteúdo original', encoding='utf-8')
+    programa = '''
+import os, sys
+from passe1_engine import win_secure as w
+original = w._gravar_handle
+def interromper(kernel, handle, texto):
+    original(kernel, handle, 'parcial')
+    os._exit(91)
+w._gravar_handle = interromper
+w.substituir(sys.argv[1], 'conteúdo original', 'novo')
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(alvo)], check=False, timeout=20)
+    assert resultado.returncode == 91
+    assert alvo.read_text(encoding='utf-8') == 'parcial'
+    journal = win_secure._journal_path(alvo)
+    assert journal.exists()
+    assert b'conte' not in journal.read_bytes()
+    win_secure.recuperar(alvo)
+    assert alvo.read_text(encoding='utf-8') == 'conteúdo original'
+    assert not journal.exists()
