@@ -1,4 +1,4 @@
-"""Compila o OpenCode fixado para a plataforma local usando Bun 1.3.14."""
+"""Compila o OpenCode fixado para a plataforma local usando o Bun exigido."""
 import os
 import platform
 import re
@@ -15,19 +15,20 @@ with segurar(raiz, timeout=300):
     fonte = raiz / "vendor" / "opencode"
     if not (fonte / "package.json").is_file():
         raise SystemExit("Inicialize o submódulo: git submodule update --init --recursive")
-    if not shutil.which("bun"):
-        raise SystemExit("Instale Bun 1.3.14 antes de compilar o motor.")
-    versao = subprocess.check_output(["bun", "--version"], text=True).strip()
-    if versao != "1.3.14":
-        raise SystemExit(f"Bun 1.3.14 é necessário; instalado: {versao}.")
-    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=fonte, check=True)
-    match = re.search(r'^VERSAO = "([^"]+)"', (raiz / "passe1.py").read_text(encoding="utf-8"), re.MULTILINE)
-    if not match:
-        raise SystemExit("Versão do Passe1 não encontrada.")
     sistema = {"Darwin": "darwin", "Linux": "linux", "Windows": "windows"}.get(platform.system())
     arquitetura = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "x64", "amd64": "x64"}.get(platform.machine().lower())
     if not sistema or not arquitetura:
         raise SystemExit("Plataforma ainda não suportada pelo build.")
+    bun_exigido = "1.4.3" if (sistema, arquitetura) == ("windows", "arm64") else "1.3.14"
+    if not shutil.which("bun"):
+        raise SystemExit(f"Instale Bun {bun_exigido} antes de compilar o motor.")
+    versao = subprocess.check_output(["bun", "--version"], text=True).strip()
+    if versao != bun_exigido:
+        raise SystemExit(f"Bun {bun_exigido} é necessário; instalado: {versao}.")
+    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=fonte, check=True)
+    match = re.search(r'^VERSAO = "([^"]+)"', (raiz / "passe1.py").read_text(encoding="utf-8"), re.MULTILINE)
+    if not match:
+        raise SystemExit("Versão do Passe1 não encontrada.")
     alvo_rg = f"{('macos' if sistema == 'darwin' else sistema)}-{arquitetura}"
     bin_dir = raiz / "passe1_engine" / "bin"
     subprocess.run([sys.executable, str(raiz / "scripts" / "fetch-rg.py"), "--target", alvo_rg, "--output", str(bin_dir)], check=True)
