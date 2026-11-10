@@ -30,6 +30,44 @@ def test_staging_recusa_extensao_invalida(tmp_path):
         pass
 
 
+def test_staging_aceita_caminho_curto_do_diretorio_pai(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import staging
+
+    pai = tmp_path / 'diretorio com nome longo para staging'
+    pai.mkdir()
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    k.GetShortPathNameW.restype = wintypes.DWORD
+    tamanho = k.GetShortPathNameW(str(pai), None, 0)
+    if not tamanho:
+        raise ctypes.WinError(ctypes.get_last_error())
+    buffer = ctypes.create_unicode_buffer(tamanho + 1)
+    if not k.GetShortPathNameW(str(pai), buffer, len(buffer)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    if os.path.normcase(buffer.value) == os.path.normcase(str(pai)):
+        pytest.skip('O volume não fornece nomes curtos para esse diretório.')
+    with staging([('.png', b'imagem')], parent=buffer.value) as caminhos:
+        assert caminhos[0].read_bytes() == b'imagem'
+
+
+def test_staging_recusa_pai_reparse(tmp_path):
+    from passe1_engine.win_private import staging
+
+    real = tmp_path / 'real'
+    real.mkdir()
+    link = tmp_path / 'link'
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f'Criação de symlink indisponível: {exc}')
+    with pytest.raises((OSError, ValueError)), staging([('.png', b'imagem')], parent=link):
+        pytest.fail('Não deve aceitar diretório reparse.')
+    assert not list(real.iterdir())
+
+
 def test_dacl_do_staging_concede_acesso_apenas_ao_usuario_atual(tmp_path):
     import ctypes
     from ctypes import wintypes

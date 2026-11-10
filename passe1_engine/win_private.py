@@ -144,6 +144,21 @@ def staging(imagens, parent=None):
             if not k.SetFileInformationByHandle(handle, 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
                 raise ctypes.WinError(ctypes.get_last_error())
 
+        def caminho_final(handle):
+            tamanho = k.GetFinalPathNameByHandleW(handle, None, 0, 0)
+            if not tamanho:
+                raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_unicode_buffer(tamanho + 1)
+            escrito = k.GetFinalPathNameByHandleW(handle, buffer, len(buffer), 0)
+            if not escrito or escrito >= len(buffer):
+                raise OSError('Não foi possível verificar o diretório de staging.')
+            final = buffer.value
+            if final.startswith('\\\\?\\UNC\\'):
+                final = '\\\\' + final[8:]
+            elif final.startswith('\\\\?\\'):
+                final = final[4:]
+            return os.path.normcase(os.path.normpath(final))
+
         pai_path = Path(os.path.abspath(parent or tempfile.gettempdir()))
         nome_dir = 'passe1-' + secrets.token_hex(16)
         caminhos, arquivos = [], []
@@ -153,6 +168,7 @@ def staging(imagens, parent=None):
             if pai == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
             try:
+                info(pai, True)
                 diretorio = abrir_relativo(pai, nome_dir, 0x110087 | 0x20000, 3, True, True)
                 info(diretorio, True)
                 dacl_privada(diretorio)
@@ -187,19 +203,7 @@ def staging(imagens, parent=None):
                     if digest.digest() != hashlib.sha256(dados).digest():
                         raise ValueError('Conteúdo da imagem mudou durante a preparação.')
                     caminhos.append(pai_path / nome_dir / nome)
-                tamanho = k.GetFinalPathNameByHandleW(diretorio, None, 0, 0)
-                if not tamanho:
-                    raise ctypes.WinError(ctypes.get_last_error())
-                buffer = ctypes.create_unicode_buffer(tamanho + 1)
-                escrito = k.GetFinalPathNameByHandleW(diretorio, buffer, len(buffer), 0)
-                if not escrito or escrito >= len(buffer):
-                    raise OSError('Não foi possível verificar o diretório de staging.')
-                final = buffer.value
-                if final.startswith('\\\\?\\UNC\\'):
-                    final = '\\\\' + final[8:]
-                elif final.startswith('\\\\?\\'):
-                    final = final[4:]
-                if os.path.normcase(os.path.normpath(final)) != os.path.normcase(os.path.normpath(str(pai_path / nome_dir))):
+                if caminho_final(diretorio) != os.path.normcase(os.path.normpath(os.path.join(caminho_final(pai), nome_dir))):
                     raise ValueError('Diretório de staging mudou durante a preparação.')
                 yield caminhos
             finally:
