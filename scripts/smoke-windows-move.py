@@ -96,7 +96,7 @@ def executar(destino_existe):
             os.environ["PASSE1_BASE_URL"] = f"http://127.0.0.1:{servidor.server_port}/v1"
             passe1._guardar_chave("sk-passe1-fixture")
             capturado = {}
-            with patch.object(launcher, "_executar_motor", side_effect=lambda args, env: capturado.update(binario=args[0], env=env)):
+            with patch("passe1_engine.tui.iniciar", side_effect=lambda binario, env, modelo: capturado.update(binario=str(binario), env=env)):
                 launcher.iniciar([])
             ambiente = capturado["env"]
             config = json.loads(ambiente["OPENCODE_CONFIG_CONTENT"])
