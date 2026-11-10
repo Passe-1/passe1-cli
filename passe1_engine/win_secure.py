@@ -230,19 +230,106 @@ def _gravar_handle(kernel, arquivo, texto):
         raise ctypes.WinError(ctypes.get_last_error())
 
 
-def substituir(caminho, anterior, novo):
+@contextlib.contextmanager
+def abrir_leitura(caminho):
+    """Abre conteúdo e identidades por handles sem seguir links no Windows."""
+    if os.name != "nt":
+        raise RuntimeError("Operação Windows indisponível nesta plataforma.")
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    alvo = Path(os.path.abspath(caminho))
+    partes = alvo.parts
+    if not alvo.is_absolute() or len(partes) < 2 or any(p in (".", "..") or ":" in p or p.endswith((" ", ".")) for p in partes[1:]):
+        raise ValueError("Caminho inválido.")
+    kernel, ntdll = ctypes.WinDLL("kernel32", use_last_error=True), ctypes.WinDLL("ntdll")
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE), ("ObjectName", ctypes.POINTER(UnicodeString)), ("Attributes", wintypes.ULONG), ("SecurityDescriptor", ctypes.c_void_p), ("SecurityQualityOfService", ctypes.c_void_p)]
+    class IoStatus(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+    class Info(ctypes.Structure):
+        _fields_ = [("attr", wintypes.DWORD), ("criado", wintypes.FILETIME), ("acesso", wintypes.FILETIME), ("alterado", wintypes.FILETIME), ("volume", wintypes.DWORD), ("size_hi", wintypes.DWORD), ("size_lo", wintypes.DWORD), ("links", wintypes.DWORD), ("id_hi", wintypes.DWORD), ("id_lo", wintypes.DWORD)]
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(Info)]
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatus), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    root = kernel.CreateFileW(partes[0], 0x100081, 3, None, 3, 0x02200000, None)
+    if root == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
+    handles = [root]
+    fd = None
+    def info(handle, diretorio):
+        dado = Info()
+        if not kernel.GetFileInformationByHandle(handle, ctypes.byref(dado)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if dado.attr & 0x400 or bool(dado.attr & 0x10) != diretorio or (not diretorio and dado.links != 1):
+            raise ValueError("Link ou tipo de arquivo não permitido.")
+        return [str(dado.volume), str(dado.id_hi), str(dado.id_lo)]
+    try:
+        pais = [info(root, True)]
+        pai = root
+        for indice, parte in enumerate(partes[1:]):
+            diretorio = indice < len(partes) - 2
+            buffer = ctypes.create_unicode_buffer(parte)
+            tamanho = len(parte.encode("utf-16-le"))
+            nome = UnicodeString(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attrs = ObjectAttributes(ctypes.sizeof(ObjectAttributes), pai, ctypes.pointer(nome), 0x40 | 0x1000, None, None)
+            novo, ios = wintypes.HANDLE(), IoStatus()
+            acesso = 0x100081 if diretorio else 0x80100080
+            status = ntdll.NtCreateFile(ctypes.byref(novo), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3 if diretorio else 1, 1, 0x00200020 | (1 if diretorio else 0x40), None, 0)
+            if status < 0:
+                raise OSError(f"NtCreateFile falhou: 0x{status & 0xffffffff:08x}")
+            handles.append(novo.value)
+            identidade = info(novo.value, diretorio)
+            if diretorio:
+                pais.append(identidade)
+                pai = novo.value
+        fd = msvcrt.open_osfhandle(handles[-1], os.O_RDONLY | os.O_BINARY)
+        handles.pop()
+        yield fd, {"pais": pais, "arquivo": identidade}
+    finally:
+        if fd is not None:
+            os.close(fd)
+        for handle in reversed(handles):
+            kernel.CloseHandle(handle)
+
+
+def snapshot(caminho):
+    if os.name != "nt":
+        raise RuntimeError("Operação Windows indisponível nesta plataforma.")
+    return _operar(caminho, "", None, capturar=True)
+
+
+def snapshot_pais(caminho):
+    if os.name != "nt":
+        raise RuntimeError("Operação Windows indisponível nesta plataforma.")
+    return _operar(caminho, None, None, capturar_pais=True)
+
+
+def substituir(caminho, anterior, novo, *, identidade=None):
     if os.name != "nt":
         raise RuntimeError("Operação Windows indisponível nesta plataforma.")
     if anterior is not None:
-        _operar(caminho, anterior, novo)
+        if identidade is None:
+            raise ValueError("Identidade do preview é obrigatória.")
+        _operar(caminho, anterior, novo, identidade_previa=identidade)
         return
-    _criar(caminho, novo)
+    if identidade is None:
+        raise ValueError("Identidade dos diretórios é obrigatória.")
+    _operar(caminho, None, novo, identidade_previa=identidade)
 
 
-def remover(caminho, anterior):
+def remover(caminho, anterior, *, identidade=None):
     if os.name != "nt":
         raise RuntimeError("Operação Windows indisponível nesta plataforma.")
-    _operar(caminho, anterior, None)
+    if identidade is None:
+        raise ValueError("Identidade do preview é obrigatória.")
+    _operar(caminho, anterior, None, identidade_previa=identidade)
 
 
 def _criar(caminho, conteudo):
@@ -259,7 +346,7 @@ def recuperar(caminho):
         _operar(caminho, "", dados["conteudo"], recuperacao=dados, journal_id=journal_id)
 
 
-def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
+def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, identidade_previa=None, capturar=False, capturar_pais=False):
     import ctypes
     from ctypes import wintypes
 
@@ -303,6 +390,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
             raise ValueError("Link ou tipo de arquivo não permitido.")
         if not diretorio and info.nNumberOfLinks != 1:
             raise ValueError("Arquivo com múltiplos links não permitido.")
+        return [str(info.dwVolumeSerialNumber), str(info.nFileIndexHigh), str(info.nFileIndexLow)]
     def relativo(pai, nome, diretorio, remover_alvo=False):
         buffer = ctypes.create_unicode_buffer(nome)
         tamanho = len(nome.encode("utf-16-le"))
@@ -312,7 +400,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
         ios = IO_STATUS_BLOCK()
         # Não compartilhar DELETE impede que ancestrais sejam renomeados durante a operação.
         opcoes = 0x00200000 | 0x20 | (1 if diretorio else 0x40)
-        acesso = 0x100081 if diretorio else ((0xC0110180 if conteudo is not None else 0x80110180) if remover_alvo else 0x40110180)
+        acesso = 0x100081 if diretorio else ((0x80100080 if capturar else (0xC0110180 if conteudo is not None else 0x80110180)) if remover_alvo else 0x40110180)
         status = ntdll.NtCreateFile(ctypes.byref(resultado), acesso,
                                    ctypes.byref(atributos), ctypes.byref(ios), None, 0,
                                    1 | 2 if diretorio else 0,
@@ -323,11 +411,19 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
         verificar(resultado.value, diretorio)
         return resultado.value
     try:
-        verificar(root, True)
+        pais = [verificar(root, True)]
         pai = root
         for parte in partes[1:-1]:
             pai = relativo(pai, parte, True)
+            pais.append(verificar(pai, True))
+        if capturar_pais:
+            return {"pais": pais, "arquivo": None}
+        if anterior is None and identidade_previa != {"pais": pais, "arquivo": None}:
+            raise ValueError("Diretório mudou após o preview.")
         arquivo = relativo(pai, partes[-1], False, remover_alvo=anterior is not None)
+        identidade_atual = {"pais": pais, "arquivo": verificar(arquivo, False)}
+        if anterior is not None and identidade_previa is not None and identidade_previa != identidade_atual:
+            raise ValueError("Arquivo ou diretório mudou após o preview.")
         if anterior is not None:
             partes_lidas = []
             tamanho_lido = 0
@@ -342,6 +438,8 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
                 if tamanho_lido > LIMITE_EDICAO:
                     raise ValueError("Arquivo excede o limite de operação de 64 MiB.")
                 partes_lidas.append(buffer.raw[:lidos.value])
+            if capturar:
+                return {"conteudo": b''.join(partes_lidas).decode('utf-8'), "identidade": identidade_atual}
             if recuperacao is None and b''.join(partes_lidas).decode('utf-8') != anterior:
                 raise ValueError("O arquivo mudou após a aprovação.")
             if conteudo is None:

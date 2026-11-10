@@ -31,24 +31,25 @@ def test_recusa_symlink_ancestral(tmp_path):
 
 
 def test_remover_so_se_conteudo_igual(tmp_path):
-    from passe1_engine.win_secure import remover
+    from passe1_engine.win_secure import remover, snapshot
     alvo = tmp_path / 'arquivo.txt'
     alvo.write_text('antes', encoding='utf-8')
+    identidade = snapshot(alvo)['identidade']
     with pytest.raises(ValueError):
-        remover(alvo, 'diferente')
+        remover(alvo, 'diferente', identidade=identidade)
     assert alvo.read_text(encoding='utf-8') == 'antes'
-    remover(alvo, 'antes')
+    remover(alvo, 'antes', identidade=identidade)
     assert not alvo.exists()
 
 
 def test_remover_recusa_hardlink(tmp_path):
-    from passe1_engine.win_secure import remover
+    from passe1_engine.win_secure import remover, snapshot
     alvo = tmp_path / 'real.txt'
     alvo.write_text('antes', encoding='utf-8')
     alias = tmp_path / 'alias.txt'
     os.link(alvo, alias)
     with pytest.raises(ValueError):
-        remover(alias, 'antes')
+        remover(alias, 'antes', identidade=snapshot(alias)['identidade'])
     assert alvo.read_text(encoding='utf-8') == 'antes'
     assert alias.exists()
 
@@ -283,22 +284,22 @@ def test_rename_proprio_nao_quebra_oplock(tmp_path):
 
 
 def test_editar_preserva_conteudo_e_permissoes_basicas(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot, substituir
     alvo = tmp_path / 'arquivo.txt'
     alvo.write_text('antes', encoding='utf-8')
     antes = alvo.stat()
-    substituir(alvo, 'antes', 'depois')
+    substituir(alvo, 'antes', 'depois', identidade=snapshot(alvo)['identidade'])
     depois = alvo.stat()
     assert alvo.read_text(encoding='utf-8') == 'depois'
     assert depois.st_mode == antes.st_mode
 
 
 def test_editar_recusa_versao_divergente(tmp_path):
-    from passe1_engine.win_secure import substituir
+    from passe1_engine.win_secure import snapshot, substituir
     alvo = tmp_path / 'arquivo.txt'
     alvo.write_text('original', encoding='utf-8')
     with pytest.raises(ValueError):
-        substituir(alvo, 'versão antiga', 'novo')
+        substituir(alvo, 'versão antiga', 'novo', identidade=snapshot(alvo)['identidade'])
     assert alvo.read_text(encoding='utf-8') == 'original'
 
 
@@ -331,7 +332,7 @@ def interromper(kernel, handle, texto):
     original(kernel, handle, 'parcial')
     os._exit(91)
 w._gravar_handle = interromper
-w.substituir(sys.argv[1], 'conteúdo original', 'novo')
+w.substituir(sys.argv[1], 'conteúdo original', 'novo', identidade=w.snapshot(sys.argv[1])['identidade'])
 '''
     resultado = subprocess.run([sys.executable, '-c', programa, str(alvo)], check=False, timeout=20)
     assert resultado.returncode == 91
@@ -373,7 +374,7 @@ def interromper(kernel, handle, texto):
     original(kernel, handle, 'parcial')
     os._exit(91)
 w._gravar_handle = interromper
-w.substituir(sys.argv[1], 'conteúdo original', 'novo')
+w.substituir(sys.argv[1], 'conteúdo original', 'novo', identidade=w.snapshot(sys.argv[1])['identidade'])
 '''
     resultado = subprocess.run([sys.executable, '-c', programa, str(alvo)], check=False, timeout=20)
     assert resultado.returncode == 91
@@ -388,11 +389,12 @@ w.substituir(sys.argv[1], 'conteúdo original', 'novo')
 
 def test_edicao_acima_do_limite_preserva_original(tmp_path, monkeypatch):
     from passe1_engine import win_secure
-    monkeypatch.setattr(win_secure, 'LIMITE_EDICAO', 3)
     alvo = tmp_path / 'arquivo.txt'
     alvo.write_text('antes', encoding='utf-8')
+    identidade = win_secure.snapshot(alvo)['identidade']
+    monkeypatch.setattr(win_secure, 'LIMITE_EDICAO', 3)
     with pytest.raises(ValueError, match='limite'):
-        win_secure.substituir(alvo, 'antes', 'x')
+        win_secure.substituir(alvo, 'antes', 'x', identidade=identidade)
     assert alvo.read_text(encoding='utf-8') == 'antes'
 
 
@@ -482,5 +484,74 @@ def test_edicao_recusa_journal_de_conteudo_divergente(tmp_path, monkeypatch):
         return guardar(caminho, 'outro conteúdo', identidade)
     monkeypatch.setattr(win_secure, '_guardar_journal', corromper)
     with pytest.raises(ValueError, match='Journal inválido'):
-        win_secure.substituir(alvo, 'antes', 'depois')
+        win_secure.substituir(alvo, 'antes', 'depois', identidade=win_secure.snapshot(alvo)['identidade'])
     assert alvo.read_text(encoding='utf-8') == 'antes'
+
+
+def test_edicao_recusa_inode_trocado_mesmo_com_conteudo_igual(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'original.txt'
+    alvo.write_text('igual', encoding='utf-8')
+    identidade = win_secure.snapshot(alvo)['identidade']
+    outro = tmp_path / 'outro.txt'
+    outro.write_text('igual', encoding='utf-8')
+    os.replace(outro, alvo)
+    with pytest.raises(ValueError, match='mudou'):
+        win_secure.substituir(alvo, 'igual', 'depois', identidade=identidade)
+    assert alvo.read_text(encoding='utf-8') == 'igual'
+
+
+def test_criacao_recusa_troca_de_diretorio_apos_preview(tmp_path):
+    from passe1_engine import win_secure
+    pasta = tmp_path / 'pasta'
+    pasta.mkdir()
+    alvo = pasta / 'novo.txt'
+    identidade = win_secure.snapshot_pais(alvo)
+    pasta.rename(tmp_path / 'anterior')
+    pasta.mkdir()
+    with pytest.raises(ValueError, match='mudou'):
+        win_secure.substituir(alvo, None, 'x', identidade=identidade)
+    assert not alvo.exists()
+    assert not (tmp_path / 'anterior' / 'novo.txt').exists()
+
+
+def test_leitura_e_identidade_compartilham_handle_e_impedem_troca(tmp_path):
+    from passe1_engine import win_secure
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('conteúdo', encoding='utf-8')
+    with win_secure.abrir_leitura(alvo) as (fd, identidade):
+        assert os.read(fd, 100).decode('utf-8') == 'conteúdo'
+        with pytest.raises(OSError):
+            os.rename(alvo, tmp_path / 'movido')
+    assert identidade == win_secure.snapshot(alvo)['identidade']
+
+
+def test_preview_recusa_inode_substituido_com_mesmo_conteudo(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('igual', encoding='utf-8')
+    with win_secure.abrir_leitura(alvo) as (fd, identidade):
+        anterior = os.read(fd, 100).decode('utf-8')
+    outro = tmp_path / 'outro.txt'
+    outro.write_text('igual', encoding='utf-8')
+    os.replace(outro, alvo)
+    with pytest.raises(ValueError, match='mudou'):
+        win_secure.substituir(alvo, anterior, 'alterado', identidade=identidade)
+    assert alvo.read_text(encoding='utf-8') == 'igual'
+
+
+def test_journal_aberto_impede_renomear_ancestrais(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal, identidade = win_secure._guardar_journal(tmp_path / 'alvo', 'segredo', (1, 2, 3))
+    fd, atual = win_secure._abrir_journal(journal)
+    try:
+        assert atual == identidade
+        for pasta in (journal.parent, journal.parent.parent):
+            with pytest.raises(OSError):
+                os.rename(pasta, pasta.with_name(pasta.name + '-movido'))
+    finally:
+        os.close(fd)
+    win_secure._apagar_journal(journal, identidade)
