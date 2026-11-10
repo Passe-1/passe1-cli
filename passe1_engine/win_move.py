@@ -334,6 +334,85 @@ def _renomear_handle(fd, diretorio, nome):
         raise OSError(f'NtSetInformationFile falhou: 0x{status & 0xffffffff:08x}')
 
 
+@contextmanager
+def _preparar_arquivo_temporario(destino, pais_aprovados):
+    """Experimento para destino ausente: temporário some ao fechar seu handle.
+
+    Não publica o arquivo nem cria diretórios; não integra o fluxo de move.
+    """
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
+
+    caminho = Path(os.path.abspath(destino))
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
+    nome = 'passe1-stage-' + secrets.token_hex(16)
+    with _ancorar_journal(caminho.parent):
+        if snapshot_pais(caminho)['pais'] != pais_aprovados:
+            raise ValueError('Diretório mudou após a aprovação.')
+        pai = kernel.CreateFileW(str(caminho.parent), 0x100084, 3, None, 3, 0x02200000, None)
+        if pai == wintypes.HANDLE(-1).value:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            info_pai = _Info()
+            if not kernel.GetFileInformationByHandle(pai, ctypes.byref(info_pai)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            id_pai = [str(info_pai.volume), str(info_pai.index_high), str(info_pai.index_low)]
+            if info_pai.attributes & 0x400 or not info_pai.attributes & 0x10 or not pais_aprovados or id_pai != pais_aprovados[-1]:
+                raise ValueError('Diretório mudou após a aprovação.')
+            buffer = ctypes.create_unicode_buffer(nome)
+            tamanho = len(nome.encode('utf-16-le'))
+            palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            atributos = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+            handle, ios = wintypes.HANDLE(), _Io()
+            status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110180, ctypes.byref(atributos), ctypes.byref(ios), None, 0, 0, 2, 0x00201060, None, 0)
+            if status < 0:
+                raise OSError(f'NtCreateFile do temporário falhou: 0x{status & 0xffffffff:08x}')
+            try:
+                info = _Info()
+                if not kernel.GetFileInformationByHandle(handle, ctypes.byref(info)):
+                    raise ctypes.WinError(ctypes.get_last_error())
+                if info.attributes & (0x400 | 0x10) or info.links != 1:
+                    raise ValueError('Temporário inválido ou com links.')
+                fd = msvcrt.open_osfhandle(handle.value, os.O_RDWR | os.O_BINARY)
+                handle = None
+                try:
+                    yield fd, pai, nome, [str(info.volume), str(info.index_high), str(info.index_low)]
+                finally:
+                    os.close(fd)
+            finally:
+                if handle is not None:
+                    kernel.CloseHandle(handle)
+        finally:
+            kernel.CloseHandle(pai)
+
+
+def _reter_temporario(fd):
+    """Experimento para cancelar exclusão automática após journal durável."""
+    if os.name != 'nt':
+        raise RuntimeError('Movimentação Windows indisponível nesta plataforma.')
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    excluir = wintypes.BOOL(False)
+    if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):
     """Experimento desconectado: guarda origem e altera destino com journal.
 

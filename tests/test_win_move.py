@@ -289,6 +289,53 @@ def test_renomeacao_por_handle_nao_sobrescreve_destino(tmp_path):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_temporario_destino_ausente_e_removido_ao_fechar(tmp_path):
+    from passe1_engine import win_secure
+
+    destino = tmp_path / 'destino-novo.txt'
+    pais = win_secure.snapshot_pais(destino)['pais']
+    with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _pai, nome, identidade):
+        assert identidade and nome.startswith('passe1-stage-')
+        win_move._gravar_handle(fd, b'conteudo')
+        assert not destino.exists()
+    assert not (tmp_path / nome).exists()
+    assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_temporario_destino_ausente_some_apos_queda_do_processo(tmp_path):
+    import subprocess
+    import sys
+
+    destino = tmp_path / 'destino-novo.txt'
+    programa = '''
+import os, sys
+from passe1_engine import win_move, win_secure
+destino = sys.argv[1]
+pais = win_secure.snapshot_pais(destino)['pais']
+with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _, _, _):
+    win_move._gravar_handle(fd, b'conteudo')
+    os._exit(91)
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(destino)], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    assert not list(tmp_path.glob('passe1-stage-*'))
+    assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_temporario_pode_ser_retido_depois_do_journal(tmp_path):
+    from passe1_engine import win_secure
+
+    destino = tmp_path / 'destino-novo.txt'
+    pais = win_secure.snapshot_pais(destino)['pais']
+    with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _pai, nome, _identidade):
+        win_move._gravar_handle(fd, b'conteudo')
+        win_move._reter_temporario(fd)
+    assert (tmp_path / nome).read_bytes() == b'conteudo'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 def test_primitivas_combina_journal_escrita_e_quarentena(tmp_path):
     from passe1_engine import win_secure
 
