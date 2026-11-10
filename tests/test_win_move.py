@@ -324,6 +324,10 @@ def test_movimentacao_experimental_preserva_original_e_journal(tmp_path):
     assert b'destino' not in journal.read_bytes()
     revisao = win_move._revisar_experimental(journal)
     assert revisao['origem_em_quarentena'] is True
+    assert revisao['origem'] == str(origem) and revisao['destino'] == str(destino)
+    assert revisao['conteudo_origem'] == 'origem'
+    assert revisao['conteudo_destino_anterior'] == 'destino'
+    assert revisao['conteudo_destino_atual'] == b'novo'
     with pytest.raises(ValueError, match='confirmação'):
         win_move._recuperar_experimental(journal, revisao['revisao'])
     win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
@@ -331,6 +335,10 @@ def test_movimentacao_experimental_preserva_original_e_journal(tmp_path):
     assert destino.read_text(encoding='utf-8') == 'destino'
     assert not (tmp_path / plano['quarentena']).exists()
     assert journal.exists()
+    with pytest.raises(ValueError, match='já utilizada'):
+        win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    with pytest.raises(ValueError, match='inválida'):
+        win_move._recuperar_experimental(journal, 'token-forjado', confirmado=True)
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
@@ -375,6 +383,8 @@ def test_recuperacao_experimental_recusa_alteracao_apos_revisao(tmp_path):
     with pytest.raises(ValueError):
         win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
     assert destino.read_text(encoding='utf-8') == 'terceiro'
+    with pytest.raises(ValueError, match='já utilizada'):
+        win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
@@ -419,3 +429,40 @@ win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, v
     win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
     assert origem.read_text(encoding='utf-8') == 'origem'
     assert destino.read_text(encoding='utf-8') == 'destino'
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer NTFS e handles do Windows')
+def test_movimentacao_e_recuperacao_preservam_acl_e_streams(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino.txt'
+    origem.write_text('origem', encoding='utf-8')
+    destino.write_text('destino', encoding='utf-8')
+    for arquivo, dados in ((origem, b'origem-ads'), (destino, b'destino-ads')):
+        with open(str(arquivo) + ':meta', 'wb') as stream:
+            stream.write(dados)
+    advapi = ctypes.WinDLL('advapi32', use_last_error=True)
+    advapi.GetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+
+    def descritor(arquivo):
+        necessario = wintypes.DWORD()
+        advapi.GetFileSecurityW(str(arquivo), 7, None, 0, ctypes.byref(necessario))
+        assert necessario.value > 0
+        buffer = ctypes.create_string_buffer(necessario.value)
+        assert advapi.GetFileSecurityW(str(arquivo), 7, buffer, len(buffer), ctypes.byref(necessario))
+        return buffer.raw[:necessario.value]
+
+    ids = (origem.stat().st_ino, destino.stat().st_ino)
+    seguranca = (descritor(origem), descritor(destino))
+    vo, vd = win_secure.snapshot(origem)['identidade'], win_secure.snapshot(destino)['identidade']
+    journal = win_move._mover_experimental(origem, destino, 'origem', 'destino', 'novo', vo, vd, tmp_path)
+    revisao = win_move._revisar_experimental(journal)
+    win_move._recuperar_experimental(journal, revisao['revisao'], confirmado=True)
+    assert (origem.stat().st_ino, destino.stat().st_ino) == ids
+    assert (descritor(origem), descritor(destino)) == seguranca
+    for arquivo, esperado in ((origem, b'origem-ads'), (destino, b'destino-ads')):
+        with open(str(arquivo) + ':meta', 'rb') as stream:
+            assert stream.read() == esperado

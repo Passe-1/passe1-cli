@@ -25,6 +25,8 @@ from passe1_engine.win_secure import (
     _abrir_journal as _abrir_journal_handle,
 )
 
+_revisoes = {}
+
 
 def _digest(texto):
     if not isinstance(texto, str):
@@ -397,19 +399,36 @@ def _revisao_fixa(journal):
                 'journal': list(identidade), 'plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
                 'destino': hashlib.sha256(atual).hexdigest(), 'quarentena': em_quarentena,
             }, sort_keys=True).encode('utf-8')).hexdigest()
-            yield arquivo, plano, arquivos, diretorios, em_quarentena, revisao
+            yield arquivo, plano, arquivos, diretorios, em_quarentena, revisao, atual
 
 
 def _revisar_experimental(journal):
-    with _revisao_fixa(journal) as (_, _, _, _, em_quarentena, revisao):
-        return {'revisao': revisao, 'origem_em_quarentena': em_quarentena}
+    """Fornece dados à prévia local; nenhum conteúdo é impresso pelo módulo."""
+    with _revisao_fixa(journal) as (_, plano, _, _, em_quarentena, revisao, atual):
+        token = secrets.token_urlsafe(32)
+        if len(_revisoes) >= 32:
+            del _revisoes[next(iter(_revisoes))]
+        _revisoes[token] = revisao
+        return {
+            'revisao': token,
+            'origem_em_quarentena': em_quarentena,
+            'origem': plano['origem'], 'destino': plano['destino'],
+            'conteudo_origem': plano['conteudo_origem'],
+            'conteudo_destino_anterior': plano['conteudo_destino'],
+            'conteudo_destino_atual': atual,
+        }
 
 
 def _recuperar_experimental(journal, revisao, *, confirmado=False):
     if confirmado is not True:
         raise ValueError('Recuperação exige confirmação explícita.')
-    with _revisao_fixa(journal) as (_, plano, arquivos, diretorios, em_quarentena, atual):
-        if not isinstance(revisao, str) or not hmac.compare_digest(revisao, atual):
+    if not isinstance(revisao, str):
+        raise TypeError('Revisão inválida ou já utilizada.')
+    esperada = _revisoes.pop(revisao, None)
+    if esperada is None:
+        raise ValueError('Revisão inválida ou já utilizada.')
+    with _revisao_fixa(journal) as (_, plano, arquivos, diretorios, em_quarentena, revisao_atual, _):
+        if not hmac.compare_digest(esperada, revisao_atual):
             raise ValueError('Estado mudou desde a revisão; recuperação recusada.')
         _restaurar_conteudo(arquivos['destino'], plano['conteudo_destino'].encode('utf-8'), plano['conteudo_novo'].encode('utf-8'), confirmado=True)
         if em_quarentena:
