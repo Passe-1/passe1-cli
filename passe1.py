@@ -15,6 +15,7 @@ import getpass
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -25,7 +26,9 @@ from urllib.parse import urlsplit
 
 import httpx
 
-VERSAO = "0.2.6"
+from terminal import seguro as _terminal_seguro
+
+VERSAO = "0.2.7"
 SISTEMA_PADRAO = "Você é o assistente do Passe1. Responda SEMPRE em português do Brasil, de forma clara e direta. Nunca misture idiomas na mesma resposta. Só use outro idioma se a pessoa pedir explicitamente."
 BASE_URL_PADRAO = "https://passe.dehor.com.br/v1"
 PREFIXO_CHAVE = "sk-passe1-"
@@ -183,7 +186,7 @@ def _login_conta(args: argparse.Namespace) -> int:
             dados_inicio = inicio.json()
             browser_code = dados_inicio["browser_code"]
             device_code = dados_inicio["device_code"]
-            if not all(isinstance(c, str) and len(c) == 43 for c in (browser_code, device_code)):
+            if not all(isinstance(c, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", c) for c in (browser_code, device_code)):
                 print("O gateway retornou uma autorização inválida.")
                 return 1
             url_autorizacao = f"{origem}/cli/autorizar?code={browser_code}"
@@ -216,7 +219,7 @@ def _login_conta(args: argparse.Namespace) -> int:
             dados = me.json()
             credito = dados.get("credito") or {}
             _guardar_sessao(origem, nome, sessao["token"])
-            print(f"Conta: {dados.get('usuario', {}).get('email', '')}")
+            print(_terminal_seguro(f"Conta: {dados.get('usuario', {}).get('email', '')}"))
             print(f"Saldo: {_reais(credito.get('saldo_cents', 0))} | bônus: {_reais(credito.get('bonus_cents', 0))}")
             ativas = [k for k in dados.get("chaves", []) if k.get("status") == "ativa"]
             if not ativas:
@@ -224,7 +227,7 @@ def _login_conta(args: argparse.Namespace) -> int:
                 return 0
             print("Escolha uma chave para usar neste computador (0 para continuar sem chave):")
             for i, chave in enumerate(ativas, 1):
-                print(f"  {i}. {chave.get('masked', 'chave')} {chave.get('label', '')}")
+                print(_terminal_seguro(f"  {i}. {chave.get('masked', 'chave')} {chave.get('label', '')}"))
             try:
                 escolha = int(input("Chave: ").strip())
             except (ValueError, EOFError):
@@ -237,7 +240,7 @@ def _login_conta(args: argparse.Namespace) -> int:
             revelar = cliente.post("/api/keys/reveal", json={"id": ativas[escolha - 1]["id"]})
             if revelar.status_code != 200:
                 _, detalhe = _codigo_erro(revelar)
-                print(detalhe or f"Não consegui recuperar a chave (HTTP {revelar.status_code}).")
+                print(_terminal_seguro(detalhe or f"Não consegui recuperar a chave (HTTP {revelar.status_code})."))
                 return 1
             chave = revelar.json().get("key", "")
             if not isinstance(chave, str) or not chave.startswith(PREFIXO_CHAVE):
@@ -267,7 +270,7 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 resposta = cliente.post("/api/keys")
                 if resposta.status_code != 201:
                     _, detalhe = _codigo_erro(resposta)
-                    print(detalhe or f"Não consegui criar a chave (HTTP {resposta.status_code}).")
+                    print(_terminal_seguro(detalhe or f"Não consegui criar a chave (HTTP {resposta.status_code})."))
                     return 1
                 chave = resposta.json().get("key", "")
                 if not isinstance(chave, str) or not chave.startswith(PREFIXO_CHAVE):
@@ -287,7 +290,7 @@ def cmd_keys(args: argparse.Namespace) -> int:
                 print("Nenhuma chave. Para criar: passe1 keys create")
             else:
                 for chave in chaves:
-                    print(f"{chave.get('masked', '-')}  {chave.get('status', '-')}  {chave.get('label', '')}")
+                    print(_terminal_seguro(f"{chave.get('masked', '-')}  {chave.get('status', '-')}  {chave.get('label', '')}"))
             return 0
     except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
         print(f"Não consegui acessar as chaves ({type(exc).__name__}).")
@@ -315,7 +318,7 @@ def cmd_usage(args: argparse.Namespace) -> int:
         for item in modelos:
             custo = item.get("custo_centavos")
             valor = _reais(custo) if custo is not None else "custo indisponível"
-            print(f"{item['modelo']}: {item['requests']} chamadas, {item['tokens_entrada']} tokens de entrada, {item['tokens_saida']} de saída, {valor}.")
+            print(_terminal_seguro(f"{item['modelo']}: {item['requests']} chamadas, {item['tokens_entrada']} tokens de entrada, {item['tokens_saida']} de saída, {valor}."))
         return 0
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         print(f"Não consegui consultar o uso ({type(exc).__name__}).")
@@ -376,10 +379,10 @@ def cmd_login(args: argparse.Namespace) -> int:
         return 0
     if resp.status_code == 401:
         codigo, detalhe = _codigo_erro(resp)
-        print(_msg_401(codigo, detalhe))
+        print(_terminal_seguro(_msg_401(codigo, detalhe)))
         return 1
     codigo, detalhe = _codigo_erro(resp)
-    print(detalhe or f"O gateway respondeu HTTP {resp.status_code}.")
+    print(_terminal_seguro(detalhe or f"O gateway respondeu HTTP {resp.status_code}."))
     return 1
 
 
@@ -421,11 +424,11 @@ def cmd_models(args: argparse.Namespace) -> int:
         return 1
     if resp.status_code == 401:
         codigo, detalhe = _codigo_erro(resp)
-        print(_msg_401(codigo, detalhe))
+        print(_terminal_seguro(_msg_401(codigo, detalhe)))
         return 1
     if resp.status_code != 200:
         _, detalhe = _codigo_erro(resp)
-        print(detalhe or f"O gateway respondeu HTTP {resp.status_code}.")
+        print(_terminal_seguro(detalhe or f"O gateway respondeu HTTP {resp.status_code}."))
         return 1
     try:
         dados = resp.json().get("data", [])
@@ -446,7 +449,7 @@ def cmd_models(args: argparse.Namespace) -> int:
         janela = modelo.get("context_window")
         if janela:
             partes.append(f"(janela: {janela} tokens)")
-        print(" ".join(partes))
+        print(_terminal_seguro(" ".join(partes)))
     return 0
 
 
@@ -499,11 +502,11 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1
     if resp.status_code == 401:
         codigo, detalhe = _codigo_erro(resp)
-        print(_msg_401(codigo, detalhe))
+        print(_terminal_seguro(_msg_401(codigo, detalhe)))
         return 1
     if resp.status_code != 200:
         _, detalhe = _codigo_erro(resp)
-        print(detalhe or f"O gateway respondeu HTTP {resp.status_code}.")
+        print(_terminal_seguro(detalhe or f"O gateway respondeu HTTP {resp.status_code}."))
         return 1
     try:
         corpo = resp.json()
@@ -549,11 +552,15 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def _post_chat(base: str, chave: str, modelo: str, mensagens: list) -> httpx.Response:
-    return _cliente(base, TIMEOUT_CHAT).post(
-        "/chat/completions",
-        headers={"Authorization": f"Bearer {chave}"},
-        json={"model": modelo, "messages": mensagens, "stream": True},
-    )
+    cliente = _cliente(base, TIMEOUT_CHAT)
+    try:
+        pedido = cliente.build_request("POST", "/chat/completions", headers={"Authorization": f"Bearer {chave}"}, json={"model": modelo, "messages": mensagens, "stream": True})
+        resposta = cliente.send(pedido, stream=True)
+    except BaseException:
+        cliente.close()
+        raise
+    resposta.extensions["passe1_cliente"] = cliente
+    return resposta
 
 
 def _texto_resposta(resp: httpx.Response) -> tuple[str | None, str | None]:
@@ -569,10 +576,18 @@ def _texto_resposta(resp: httpx.Response) -> tuple[str | None, str | None]:
         return None, detalhe or f"O gateway respondeu HTTP {resp.status_code}."
     try:
         corpo = resp.json()
-        texto = corpo["choices"][0]["message"]["content"]
-    except (ValueError, KeyError, IndexError, TypeError):
+        escolha = corpo["choices"][0]
+        motivo = escolha.get("finish_reason")
+        if motivo == "length":
+            return None, "Resposta incompleta: limite de tokens atingido."
+        if motivo not in (None, "stop"):
+            return None, "Resposta interrompida pelo modelo."
+        texto = escolha["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         return None, "O gateway respondeu num formato que nao entendi."
-    return str(texto), None
+    if not isinstance(texto, str):
+        return None, "O gateway respondeu sem texto válido."
+    return texto, None
 
 
 def _imprimir_sse(texto: str, prefixo: str) -> str | None:
@@ -581,29 +596,58 @@ def _imprimir_sse(texto: str, prefixo: str) -> str | None:
     Retorna o texto completo, ou None se o corpo nao for SSE (nesse
     caso nada e impresso e o chamador tenta o JSON simples).
     """
+    return _imprimir_sse_linhas(texto.splitlines(), prefixo)
+
+
+def _imprimir_sse_linhas(linhas, prefixo: str) -> str | None:
     partes: list[str] = []
     viu_sse = False
+    terminou = False
     comecou = False
-    for linha in texto.splitlines():
+    for linha in linhas:
         linha = linha.strip()
         if not linha.startswith("data:"):
             continue
         viu_sse = True
         dado = linha[5:].strip()
         if dado == "[DONE]":
+            terminou = True
             break
         try:
-            delta = json.loads(dado)["choices"][0]["delta"].get("content") or ""
-        except (ValueError, KeyError, IndexError, TypeError):
+            evento = json.loads(dado)
+        except ValueError as exc:
+            raise RuntimeError("O gateway retornou streaming inválido.") from exc
+        if not isinstance(evento, dict):
+            raise TypeError("O gateway retornou streaming inválido.")
+        if evento.get("error"):
+            raise RuntimeError("O gateway informou erro durante a resposta.")
+        escolhas = evento.get("choices")
+        if escolhas == []:
             continue
+        if not isinstance(escolhas, list) or not escolhas or not isinstance(escolhas[0], dict):
+            raise RuntimeError("O gateway retornou streaming inválido.")
+        escolha = escolhas[0]
+        motivo = escolha.get("finish_reason")
+        if motivo == "length":
+            raise RuntimeError("Resposta incompleta: limite de tokens atingido.")
+        if motivo not in (None, "stop"):
+            raise RuntimeError("Resposta interrompida pelo modelo.")
+        if motivo == "stop":
+            terminou = True
+        delta = escolha.get("delta") or {}
+        if not isinstance(delta, dict):
+            raise TypeError("O gateway retornou streaming inválido.")
+        delta = delta.get("content") or ""
         if delta:
             if not comecou:
                 print(prefixo, end="", flush=True)
                 comecou = True
-            print(delta, end="", flush=True)
+            print(_terminal_seguro(delta), end="", flush=True)
             partes.append(str(delta))
     if not viu_sse:
         return None
+    if not terminou:
+        raise RuntimeError("Resposta interrompida antes da confirmação de término.")
     if comecou:
         print()
     else:
@@ -612,20 +656,31 @@ def _imprimir_sse(texto: str, prefixo: str) -> str | None:
 
 
 def _mostrar_resposta_chat(resp: httpx.Response, prefixo: str = "") -> tuple[str | None, str | None]:
-    """Imprime a resposta do chat e retorna (texto, erro).
-
-    Tenta o stream SSE primeiro; se o gateway mandou JSON simples,
-    cai no parse normal sem quebrar.
-    """
-    if resp.status_code != 200:
-        return _texto_resposta(resp)
-    texto = _imprimir_sse(resp.text, prefixo)
-    if texto is not None:
-        return texto, None
-    texto, erro = _texto_resposta(resp)
-    if texto is not None:
-        print(f"{prefixo}{texto}")
-    return texto, erro
+    """Imprime SSE em tempo real; devolve texto original para o histórico."""
+    try:
+        if resp.status_code == 200 and "text/event-stream" in resp.headers.get("content-type", "").lower():
+            texto = _imprimir_sse_linhas(resp.iter_lines(), prefixo)
+            return (texto, None) if texto is not None else (None, "Resposta de streaming inválida.")
+        if not resp.is_closed:
+            resp.read()
+        if resp.status_code != 200:
+            return _texto_resposta(resp)
+        texto = _imprimir_sse(resp.text, prefixo)
+        if texto is not None:
+            return texto, None
+        texto, erro = _texto_resposta(resp)
+        if texto is not None:
+            print(f"{prefixo}{_terminal_seguro(texto)}")
+        return texto, erro
+    except httpx.HTTPError:
+        return None, "A conexão com o gateway foi interrompida durante a resposta."
+    except (RuntimeError, TypeError) as exc:
+        return None, str(exc)
+    finally:
+        resp.close()
+        cliente = resp.extensions.get("passe1_cliente")
+        if cliente is not None:
+            cliente.close()
 
 
 def _imagens(caminhos: list[str]) -> list[dict]:
@@ -679,7 +734,7 @@ def _uma_pergunta(
         return 1
     _, erro = _mostrar_resposta_chat(resp)
     if erro is not None:
-        print(erro)
+        print(_terminal_seguro(erro))
         return 1
     return 0
 
@@ -904,7 +959,7 @@ def _repl(
             resposta, erro = _mostrar_resposta_chat(resp, prefixo="passe1: ")
             if erro is not None:
                 historico.pop()
-                print(erro)
+                print(_terminal_seguro(erro))
                 continue
             imagens = None
             historico.append({"role": "assistant", "content": resposta})
@@ -943,6 +998,15 @@ def cmd_agent(args: argparse.Namespace) -> int:
     chave = _ler_chave(_base_url(args.base_url))
     if chave is None:
         return _sem_login()
+    import arquivos_seguros
+    try:
+        arquivos_seguros._disponivel()
+    except RuntimeError as exc:
+        print(str(exc))
+        return 1
+    if args.sandbox and (sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK)):
+        print("Sandbox de comandos indisponível nesta plataforma; nenhum pedido foi enviado.")
+        return 1
     tarefa = " ".join(args.tarefa).strip()
     interativo = not tarefa
     if interativo and not sys.stdin.isatty():
@@ -950,9 +1014,18 @@ def cmd_agent(args: argparse.Namespace) -> int:
         return 1
     modelo = args.model or _modelo_padrao()
     imagens = _imagens(args.image or [])
-    sucesso, erro = agente.executar(_base_url(args.base_url), chave, modelo, tarefa, _cliente, input, interativo=interativo, imagens=imagens)
+    if args.session:
+        from sessao import Sessao
+        try:
+            with Sessao(_dir_config(), args.session, Path.cwd().resolve(), _base_url(args.base_url), modelo, chave) as sessao:
+                sucesso, erro = agente.executar(_base_url(args.base_url), chave, modelo, tarefa, _cliente, input, interativo=interativo, imagens=imagens, sessao=sessao, usar_sandbox=args.sandbox)
+        except OSError as exc:
+            print(f"Não foi possível acessar a sessão ({type(exc).__name__}).")
+            return 1
+    else:
+        sucesso, erro = agente.executar(_base_url(args.base_url), chave, modelo, tarefa, _cliente, input, interativo=interativo, imagens=imagens, usar_sandbox=args.sandbox)
     if erro:
-        print(erro)
+        print(_terminal_seguro(erro))
     return 0 if sucesso else 1
 
 
@@ -1031,6 +1104,8 @@ def montar_parser() -> argparse.ArgumentParser:
     p_agent = sub.add_parser("agent", help="Trabalhar em código no projeto atual.")
     p_agent.add_argument("tarefa", nargs="*", help="Tarefa a executar no projeto.")
     p_agent.add_argument("--model", default=None, help="Modelo com suporte a ferramentas.")
+    p_agent.add_argument("--sandbox", action="store_true", help="Bloquear escrita e rede dos comandos aprovados (macOS; somente leitura).")
+    p_agent.add_argument("--session", help="Nome para salvar e retomar o histórico local do agente.")
     p_agent.add_argument("--image", action="append", help="Imagem local (repita para anexar mais de uma).")
     p_agent.set_defaults(func=cmd_agent)
 
