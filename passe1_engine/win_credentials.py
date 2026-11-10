@@ -35,6 +35,7 @@ def _abrir(caminho, *, gravar):
     k.SetFilePointerEx.argtypes = [wintypes.HANDLE, ctypes.c_longlong, ctypes.c_void_p, wintypes.DWORD]
     k.SetEndOfFile.argtypes = [wintypes.HANDLE]
     k.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+    k.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     a.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     a.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
     a.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.LPWSTR)]
@@ -61,7 +62,7 @@ def _abrir(caminho, *, gravar):
         sid = ctypes.cast(usuario, ctypes.POINTER(_TokenUser)).contents.User.Sid
         if not a.ConvertSidToStringSidW(sid, ctypes.byref(sid_text)):
             raise ctypes.WinError(ctypes.get_last_error())
-        if not a.ConvertStringSecurityDescriptorToSecurityDescriptorW(f'D:P(A;;FA;;;{sid_text.value})', 1, ctypes.byref(descricao), None):
+        if not a.ConvertStringSecurityDescriptorToSecurityDescriptorW(f'O:{sid_text.value}D:P(A;;FA;;;{sid_text.value})', 1, ctypes.byref(descricao), None):
             raise ctypes.WinError(ctypes.get_last_error())
         if ':' in alvo.name or alvo.name.endswith((' ', '.')):
             raise ValueError('Nome de credencial inválido.')
@@ -72,12 +73,13 @@ def _abrir(caminho, *, gravar):
             buffer = ctypes.create_unicode_buffer(alvo.name)
             tamanho_nome = len(alvo.name.encode('utf-16-le'))
             palavra = _Unicode(tamanho_nome, tamanho_nome + 2, ctypes.cast(buffer, wintypes.LPWSTR))
-            acesso = 0xC0120080 if gravar else 0x80120080
+            acesso = 0xC0130080 if gravar else 0x80120080
             def abrir_relativo(criar):
                 attrs = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, descricao if criar else None, None)
                 resultado, ios = wintypes.HANDLE(), _Io()
                 status = n.NtCreateFile(ctypes.byref(resultado), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 0, 2 if criar else 1, 0x00200060, None, 0)
                 return status, resultado.value
+            criado = False
             status, handle = abrir_relativo(False)
             if status < 0:
                 if status & 0xffffffff != 0xc0000034:
@@ -87,6 +89,7 @@ def _abrir(caminho, *, gravar):
                 status, handle = abrir_relativo(True)
                 if status < 0:
                     raise OSError(f'Não foi possível criar credencial: 0x{status & 0xffffffff:08x}')
+                criado = True
             try:
                 info = _Info()
                 if not k.GetFileInformationByHandle(handle, ctypes.byref(info)):
@@ -99,8 +102,12 @@ def _abrir(caminho, *, gravar):
                     raise OSError(erro, 'Não foi possível verificar permissões da credencial.')
                 try:
                     controle, revisao, tamanho_acl = wintypes.WORD(), wintypes.DWORD(), _AclSize()
-                    if not dono or not a.EqualSid(sid, dono) or not a.GetSecurityDescriptorControl(sec, ctypes.byref(controle), ctypes.byref(revisao)) or not controle.value & 0x1000:
-                        raise ValueError('Credencial antiga sem proteção; remova-a e faça login novamente.')
+                    if not dono or not a.EqualSid(sid, dono):
+                        raise ValueError('Credencial antiga sem proteção: proprietário diferente; remova-a e faça login novamente.')
+                    if not a.GetSecurityDescriptorControl(sec, ctypes.byref(controle), ctypes.byref(revisao)):
+                        raise ctypes.WinError(ctypes.get_last_error())
+                    if not controle.value & 0x1000:
+                        raise ValueError('Credencial antiga sem proteção: DACL herdada; remova-a e faça login novamente.')
                     if not acl or not a.GetAclInformation(acl, ctypes.byref(tamanho_acl), ctypes.sizeof(tamanho_acl), 2) or tamanho_acl.AceCount != 1:
                         raise ValueError('Credencial antiga sem proteção; remova-a e faça login novamente.')
                     ace = ctypes.c_void_p()
@@ -112,6 +119,12 @@ def _abrir(caminho, *, gravar):
                 finally:
                     k.LocalFree(sec)
                 yield k, handle
+            except BaseException as exc:
+                if criado:
+                    excluir = wintypes.BOOL(True)
+                    if not k.SetFileInformationByHandle(handle, 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+                        raise OSError('Não foi possível remover credencial incompleta.') from exc
+                raise
             finally:
                 k.CloseHandle(handle)
     finally:
