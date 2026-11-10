@@ -461,3 +461,28 @@ def test_multiplas_criacoes_em_pasta_nova_usam_identidade_atualizada(tmp_path):
     win_secure.substituir(segundo, None, 'dois', identidade={'pais': criado['pais']})
     assert primeiro.read_text(encoding='utf-8') == 'um'
     assert segundo.read_text(encoding='utf-8') == 'dois'
+
+
+def test_leitura_aceita_editor_aberto_e_impede_escrita_concorrente(tmp_path):
+    import ctypes
+    from ctypes import wintypes
+
+    from passe1_engine import win_secure
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    alvo = tmp_path / 'aberto.txt'
+    alvo.write_text('original', encoding='utf-8')
+    editor = kernel.CreateFileW(str(alvo), 0x40000000, 7, None, 3, 0, None)
+    assert editor != wintypes.HANDLE(-1).value
+    try:
+        with win_secure.abrir_leitura(alvo) as (fd, _):
+            assert os.read(fd, 100) == b'original'
+            dados = ctypes.create_string_buffer(b'x')
+            escritos = wintypes.DWORD()
+            assert not kernel.WriteFile(editor, dados, 1, ctypes.byref(escritos), None)
+    finally:
+        kernel.CloseHandle(editor)
+    assert alvo.read_text(encoding='utf-8') == 'original'
