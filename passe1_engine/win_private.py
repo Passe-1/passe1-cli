@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import ctypes
+import hashlib
 import os
 import re
 import secrets
@@ -69,6 +70,7 @@ def staging(imagens, parent=None):
     k.GetFinalPathNameByHandleW.restype = wintypes.DWORD
     k.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
     k.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+    k.ReadFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
     k.FlushFileBuffers.argtypes = [wintypes.HANDLE]
     a.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
     a.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
@@ -174,6 +176,16 @@ def staging(imagens, parent=None):
                     if info(leitura, False) != identidade:
                         raise ValueError('Imagem mudou durante a preparação.')
                     dacl_privada(leitura)
+                    digest = hashlib.sha256()
+                    while True:
+                        parte, lidos = ctypes.create_string_buffer(65536), wintypes.DWORD()
+                        if not k.ReadFile(leitura, parte, len(parte), ctypes.byref(lidos), None):
+                            raise ctypes.WinError(ctypes.get_last_error())
+                        if not lidos.value:
+                            break
+                        digest.update(parte.raw[:lidos.value])
+                    if digest.digest() != hashlib.sha256(dados).digest():
+                        raise ValueError('Conteúdo da imagem mudou durante a preparação.')
                     caminhos.append(pai_path / nome_dir / nome)
                 tamanho = k.GetFinalPathNameByHandleW(diretorio, None, 0, 0)
                 if not tamanho:

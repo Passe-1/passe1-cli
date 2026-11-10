@@ -94,3 +94,59 @@ def test_staging_impede_renomear_diretorio_enquanto_imagem_aberta(tmp_path):
         with pytest.raises(OSError):
             os.rename(pasta, pasta.with_name('movido'))
         assert caminhos[0].read_bytes() == b'conteudo-teste'
+
+
+def test_staging_recusa_modificacao_entre_handles(tmp_path, monkeypatch):
+    import ctypes
+
+    from passe1_engine.win_private import staging
+
+    carregar = ctypes.WinDLL
+    alterado = []
+
+    class Funcao:
+        def __init__(self, original, depois):
+            self.original = original
+            self.depois = depois
+
+        def __call__(self, *args):
+            resultado = self.original(*args)
+            self.depois()
+            return resultado
+
+        @property
+        def argtypes(self):
+            return self.original.argtypes
+
+        @argtypes.setter
+        def argtypes(self, valor):
+            self.original.argtypes = valor
+
+    class Kernel:
+        def __init__(self, original):
+            self.original = original
+            self.gravado = False
+            self.WriteFile = Funcao(original.WriteFile, self.marcar)
+            self.CloseHandle = Funcao(original.CloseHandle, self.atacar)
+
+        def __getattr__(self, nome):
+            return getattr(self.original, nome)
+
+        def marcar(self):
+            self.gravado = True
+
+        def atacar(self):
+            if self.gravado and not alterado:
+                arquivo = next(tmp_path.glob('passe1-*/*.png'))
+                arquivo.write_bytes(b'conteudo-alterado')
+                alterado.append(True)
+
+    def carregar_interceptado(nome, *args, **kwargs):
+        biblioteca = carregar(nome, *args, **kwargs)
+        return Kernel(biblioteca) if nome == 'kernel32' else biblioteca
+
+    monkeypatch.setattr(ctypes, 'WinDLL', carregar_interceptado)
+    with pytest.raises(ValueError, match='Conteúdo da imagem mudou'), staging([('.png', b'conteudo-teste')], parent=tmp_path):
+        pytest.fail('A imagem modificada não pode ser entregue.')
+    assert alterado
+    assert not list(tmp_path.glob('passe1-*'))
