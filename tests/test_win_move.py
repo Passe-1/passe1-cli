@@ -324,7 +324,7 @@ with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _, _, _):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
-def test_temporario_pode_ser_retido_depois_do_journal(tmp_path):
+def test_hipotese_cancelar_exclusao_automatica_do_temporario(tmp_path):
     from passe1_engine import win_secure
 
     destino = tmp_path / 'destino-novo.txt'
