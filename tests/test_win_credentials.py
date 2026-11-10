@@ -81,3 +81,47 @@ def test_link_final_nao_le_nem_altera_alvo(tmp_path):
     with pytest.raises((ValueError, OSError)):
         win_credentials.gravar(link, b'modificado')
     assert win_credentials.ler(alvo) == b'original'
+
+
+def test_fluxo_real_de_login_grava_e_le_arquivos_privados(tmp_path, monkeypatch):
+    import passe1
+    from passe1_engine import launcher, win_credentials
+
+    config = tmp_path / 'compartilhada'
+    config.mkdir()
+    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(config))
+    passe1._guardar_sessao('https://passe1.exemplo', 'passe1_session', 'token-ficticio')
+    passe1._guardar_chave('sk-passe1-ficticia')
+    assert passe1._ler_sessao()['token'] == 'token-ficticio'
+    assert passe1._ler_chave('https://passe1.exemplo') == 'sk-passe1-ficticia'
+    launcher._guardar_credencial('sk-passe1-ficticia')
+    arquivos = [config / 'key', config / 'session', config / 'key-session', config / 'opencode/data/opencode/auth.json']
+    for arquivo in arquivos:
+        assert win_credentials.ler(arquivo)
+        acl = subprocess.run(['icacls', str(arquivo)], capture_output=True, text=True, errors='replace', check=True, timeout=30).stdout
+        assert '(I)' not in acl and 'Everyone' not in acl and 'S-1-1-0' not in acl
+
+
+@pytest.mark.parametrize('nome', ['key', 'session', 'key-session', 'auth.json'])
+def test_credencial_legada_insegura_e_recusada_com_orientacao(tmp_path, monkeypatch, nome):
+    import passe1
+    from passe1_engine import launcher
+
+    config = tmp_path / 'compartilhada'
+    config.mkdir()
+    subprocess.run(['icacls', str(config), '/grant', '*S-1-1-0:(OI)(CI)F'], capture_output=True, check=True, timeout=30)
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(config))
+    if nome == 'key-session':
+        passe1._guardar_sessao('https://passe1.exemplo', 'passe1_session', 'token-ficticio')
+    arquivo = config / ('opencode/data/opencode/auth.json' if nome == 'auth.json' else nome)
+    arquivo.parent.mkdir(parents=True, exist_ok=True)
+    arquivo.write_bytes(b'credencial-antiga')
+    with pytest.raises(ValueError, match='remova o arquivo e faça login novamente'):
+        if nome == 'session':
+            passe1._ler_sessao()
+        elif nome in ('key', 'key-session'):
+            passe1._ler_chave('https://passe1.exemplo')
+        else:
+            launcher._guardar_credencial('sk-passe1-nova')
+    assert arquivo.read_bytes() == b'credencial-antiga'

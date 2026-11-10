@@ -33,6 +33,9 @@ def limpar_credencial():
 def _guardar_credencial(chave):
     raiz = _raiz()
     diretorio = raiz / "data" / "opencode"
+    if os.name == "nt":
+        passe1._gravar_config_privado(diretorio / "auth.json", json.dumps({"passe1": {"type": "api", "key": chave}}))
+        return
     for pasta in (raiz, raiz / "data", diretorio):
         if pasta.is_symlink():
             raise ValueError("Diretório de autenticação inválido.")

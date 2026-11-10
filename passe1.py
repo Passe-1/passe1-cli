@@ -56,6 +56,32 @@ def _arquivo_chave() -> Path:
     return _dir_config() / "key"
 
 
+def _ler_config_privado(caminho: Path) -> str:
+    if os.name == "nt":
+        from passe1_engine import win_credentials
+        try:
+            return win_credentials.ler(caminho).decode("utf-8")
+        except ValueError as exc:
+            raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
+    return caminho.read_text(encoding="utf-8")
+
+
+def _gravar_config_privado(caminho: Path, texto: str) -> None:
+    if os.name == "nt":
+        from passe1_engine import win_credentials
+        try:
+            win_credentials.gravar(caminho, texto.encode("utf-8"))
+        except ValueError as exc:
+            raise ValueError(f"Credencial local insegura em {caminho}; remova o arquivo e faça login novamente. ({exc})") from exc
+        return
+    caminho.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(caminho.parent, 0o700)
+    fd = os.open(caminho, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
+        arquivo.write(texto)
+    os.chmod(caminho, 0o600)
+
+
 def _base_url(args_base: str | None = None) -> str:
     base = (args_base or os.environ.get("PASSE1_BASE_URL") or BASE_URL_PADRAO).rstrip("/")
     _origem(base)
@@ -78,33 +104,23 @@ def _ler_chave(base: str | None = None) -> str | None:
         except ValueError:
             return None
         try:
-            binding = (_dir_config() / "key-session").read_text(encoding="utf-8").strip()
+            binding = _ler_config_privado(_dir_config() / "key-session").strip()
         except OSError:
             return None
         if binding != hashlib.sha256(sessao["token"].encode()).hexdigest():
             return None
     try:
-        texto = _arquivo_chave().read_text(encoding="utf-8").strip()
+        texto = _ler_config_privado(_arquivo_chave()).strip()
     except OSError:
         return None
     return texto or None
 
 
 def _guardar_chave(chave: str) -> None:
-    destino = _arquivo_chave()
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destino.parent, 0o700)
-    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        os.write(fd, (chave.strip() + "\n").encode("utf-8"))
-    finally:
-        os.close(fd)
-    os.chmod(destino, 0o600)
+    _gravar_config_privado(_arquivo_chave(), chave.strip() + "\n")
     sessao = _ler_sessao()
     if sessao:
-        (_dir_config() / "key-session").write_text(
-            hashlib.sha256(sessao["token"].encode()).hexdigest(), encoding="utf-8"
-        )
+        _gravar_config_privado(_dir_config() / "key-session", hashlib.sha256(sessao["token"].encode()).hexdigest())
 
 
 def _origem(base: str) -> str:
@@ -117,24 +133,22 @@ def _origem(base: str) -> str:
 
 
 def _guardar_sessao(origem: str, nome: str, token: str) -> None:
-    destino = _dir_config() / "session"
-    destino.parent.mkdir(parents=True, exist_ok=True)
-    os.chmod(destino.parent, 0o700)
-    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as arquivo:
-        json.dump({"origem": origem, "nome": nome, "token": token}, arquivo)
-    os.chmod(destino, 0o600)
+    _gravar_config_privado(_dir_config() / "session", json.dumps({"origem": origem, "nome": nome, "token": token}))
 
 
 def _ler_sessao() -> dict | None:
     try:
-        dados = json.loads((_dir_config() / "session").read_text(encoding="utf-8"))
+        texto = _ler_config_privado(_dir_config() / "session")
+    except OSError:
+        return None
+    try:
+        dados = json.loads(texto)
         if not isinstance(dados, dict) or not all(isinstance(dados.get(k), str) and dados[k] for k in ("origem", "nome", "token")):
             return None
         if dados["nome"] not in ("passe1_session", "__Host-passe1_session"):
             return None
         return dados
-    except (OSError, ValueError):
+    except ValueError:
         return None
 
 
@@ -1280,13 +1294,13 @@ def montar_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argumentos = sys.argv[1:] if argv is None else argv
-    if not argumentos and sys.stdin.isatty() and sys.stdout.isatty():
-        from passe1_engine.launcher import iniciar
-        return iniciar([])
-    if not argumentos:
-        argumentos = ["agent"]
-    args = montar_parser().parse_args(argumentos)
     try:
+        if not argumentos and sys.stdin.isatty() and sys.stdout.isatty():
+            from passe1_engine.launcher import iniciar
+            return iniciar([])
+        if not argumentos:
+            argumentos = ["agent"]
+        args = montar_parser().parse_args(argumentos)
         return int(args.func(args))
     except ValueError as exc:
         print(str(exc))
