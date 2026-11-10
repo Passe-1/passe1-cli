@@ -437,6 +437,40 @@ def _preparar_stage_registrado(journal):
             _guardar_journal_ancorado(Path(str(arquivo) + '.stage'), plano['destino'], json.dumps(registro, ensure_ascii=False), id_stage)
 
 
+@contextmanager
+def _abrir_registro_stage(journal):
+    """Fixa e cruza os dois registros antes de qualquer publicação futura."""
+    with _abrir_plano_fixo(journal) as (arquivo, id_journal, plano):
+        fd, _identidade = _abrir_journal_handle(Path(str(arquivo) + '.stage'))
+        try:
+            dados = _conteudo_handle(fd)
+            documento = json.loads(_dpapi(dados, False).decode('utf-8'))
+            if not isinstance(documento, dict) or not isinstance(documento.get('conteudo'), str):
+                raise TypeError('Registro de stage inválido.')
+            registro = json.loads(documento['conteudo'])
+            if not isinstance(registro, dict):
+                raise TypeError('Registro de stage inválido.')
+            id_stage = registro.get('id_stage')
+            esperado = hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
+            if (
+                plano.get('destino_ausente') is not True
+                or registro.get('versao') != 1
+                or registro.get('journal') != list(id_journal)
+                or registro.get('stage') != plano.get('stage')
+                or registro.get('pais_destino') != plano.get('pais_destino')
+                or registro.get('hash_novo') != plano.get('hash_novo')
+                or registro.get('hash_plano') != esperado
+                or documento.get('caminho') != plano['destino']
+                or documento.get('identidade') != id_stage
+                or not isinstance(id_stage, list) or len(id_stage) != 3
+                or any(not isinstance(v, str) or not v.isdecimal() for v in id_stage)
+            ):
+                raise ValueError('Registro de stage não corresponde ao journal.')
+            yield plano, registro
+        finally:
+            os.close(fd)
+
+
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):
     """Experimento desconectado: guarda origem e altera destino com journal.
 

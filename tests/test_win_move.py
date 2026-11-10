@@ -368,6 +368,15 @@ def test_stage_persistente_exige_journal_previo_e_nao_sobrescreve(tmp_path):
     registro = json.loads(win_secure._ler_journal(str(journal) + '.stage')['conteudo'])
     assert registro['id_stage'] == identidade and registro['stage'] == nome
     assert registro['hash_novo'] == win_move._digest('novo')
+    with win_move._abrir_registro_stage(journal) as (plano_lido, registro_lido):
+        assert plano_lido == plano and registro_lido == registro
+    registro['hash_plano'] = '0' * 64
+    arquivo_registro = Path(str(journal) + '.stage')
+    arquivo_registro.unlink()
+    with win_secure._ancorar_journal(tmp_path):
+        win_secure._guardar_journal_ancorado(arquivo_registro, destino, json.dumps(registro), identidade)
+    with pytest.raises(ValueError, match='não corresponde'), win_move._abrir_registro_stage(journal):
+        pytest.fail('Não deve aceitar registro de outro plano.')
     assert (tmp_path / nome).read_bytes() == b'novo'
     assert origem.read_text(encoding='utf-8') == 'origem'
     assert not destino.exists()
