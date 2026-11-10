@@ -193,20 +193,24 @@ def _ler_journal(arquivo):
     return _ler_journal_com_id(arquivo)[0]
 
 
-def _apagar_journal(arquivo, identidade):
+def _marcar_exclusao_journal(fd):
     import ctypes
     import msvcrt
     from ctypes import wintypes
 
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    excluir = wintypes.BOOL(True)
+    if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _apagar_journal(arquivo, identidade):
     fd, atual = _abrir_journal(arquivo)
     try:
         if atual != tuple(identidade):
             raise ValueError("Journal mudou; nenhum arquivo foi apagado.")
-        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
-        excluir = wintypes.BOOL(True)
-        if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
-            raise ctypes.WinError(ctypes.get_last_error())
+        _marcar_exclusao_journal(fd)
     finally:
         os.close(fd)
 
@@ -356,17 +360,31 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
                     journal = _journal_path(alvo)
                 else:
                     journal, journal_id = _guardar_journal(alvo, anterior, identidade)
+                journal_fd, atual = _abrir_journal(journal)
                 try:
-                    _gravar_handle(kernel, arquivo, conteudo)
-                except BaseException as exc:
-                    if recuperacao is not None:
-                        raise OSError(f"Falha na recuperação; backup criptografado preservado em {journal}.") from exc
+                    if atual != tuple(journal_id):
+                        raise ValueError("Journal mudou; arquivo original não foi alterado.")
+                    with os.fdopen(os.dup(journal_fd), "rb") as f:
+                        verificado = json.loads(_dpapi(f.read(), False).decode("utf-8"))
+                    conteudo_original = conteudo if recuperacao is not None else anterior
+                    if (not isinstance(verificado, dict)
+                            or os.path.normcase(verificado.get("caminho", "")) != os.path.normcase(os.path.abspath(alvo))
+                            or verificado.get("identidade") != list(identidade)
+                            or verificado.get("conteudo") != conteudo_original):
+                        raise ValueError("Journal inválido; arquivo original não foi alterado.")
                     try:
-                        _gravar_handle(kernel, arquivo, anterior)
-                    except BaseException as erro_restauracao:
-                        raise OSError(f"Falha na edição e restauração; backup criptografado em {journal}.") from erro_restauracao
-                    raise OSError(f"Falha na edição; conteúdo anterior restaurado. Backup em {journal}.") from exc
-                _apagar_journal(journal, journal_id)
+                        _gravar_handle(kernel, arquivo, conteudo)
+                    except BaseException as exc:
+                        if recuperacao is not None:
+                            raise OSError(f"Falha na recuperação; backup criptografado preservado em {journal}.") from exc
+                        try:
+                            _gravar_handle(kernel, arquivo, anterior)
+                        except BaseException as erro_restauracao:
+                            raise OSError(f"Falha na edição e restauração; backup criptografado em {journal}.") from erro_restauracao
+                        raise OSError(f"Falha na edição; conteúdo anterior restaurado. Backup em {journal}.") from exc
+                    _marcar_exclusao_journal(journal_fd)
+                finally:
+                    os.close(journal_fd)
                 return
         try:
             dados = conteudo.encode('utf-8')

@@ -456,3 +456,31 @@ def test_journal_nao_cria_diretorio_atraves_de_symlink(tmp_path, monkeypatch):
     with pytest.raises((OSError, ValueError)):
         win_secure._guardar_journal(tmp_path / 'alvo', 'segredo', (1, 2, 3))
     assert not (fora / 'novo').exists()
+
+
+def test_journal_aberto_nao_pode_ser_renomeado(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal, identidade = win_secure._guardar_journal(tmp_path / 'alvo', 'segredo', (1, 2, 3))
+    fd, atual = win_secure._abrir_journal(journal)
+    try:
+        assert atual == identidade
+        with pytest.raises(OSError):
+            os.rename(journal, journal.with_name('movido'))
+    finally:
+        os.close(fd)
+    win_secure._apagar_journal(journal, identidade)
+
+
+def test_edicao_recusa_journal_de_conteudo_divergente(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    guardar = win_secure._guardar_journal
+    def corromper(caminho, _conteudo, identidade):
+        return guardar(caminho, 'outro conteúdo', identidade)
+    monkeypatch.setattr(win_secure, '_guardar_journal', corromper)
+    with pytest.raises(ValueError, match='Journal inválido'):
+        win_secure.substituir(alvo, 'antes', 'depois')
+    assert alvo.read_text(encoding='utf-8') == 'antes'
