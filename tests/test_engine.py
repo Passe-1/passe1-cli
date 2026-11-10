@@ -1,4 +1,6 @@
 import json
+import os
+import pytest
 from pathlib import Path
 from unittest.mock import patch
 
@@ -293,6 +295,7 @@ def test_supervisor_encaminha_sinal_recebido_durante_spawn(monkeypatch):
     assert processo.recebido == [signal.SIGTERM]
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='limpeza POSIX; Windows coberto pelo adaptador DACL')
 def test_falha_ao_limpar_staging_nao_e_silenciada(tmp_path):
     import argparse
     imagem = tmp_path / 'foto.png'
@@ -309,3 +312,40 @@ def test_falha_ao_limpar_staging_nao_e_silenciada(tmp_path):
         import pytest
         with pytest.raises(ValueError, match='remover o staging'):
             launcher.iniciar([], agente=args)
+
+
+def test_staging_windows_usa_bytes_validados_e_aguarda_supervisor(tmp_path, monkeypatch):
+    import argparse
+    from contextlib import contextmanager
+    from passe1_engine import win_image_adapter
+    imagem = tmp_path / 'foto.png'
+    dados = b'\x89PNG\r\n\x1a\noriginal'
+    imagem.write_bytes(dados)
+    staged = tmp_path / 'staged.png'
+    eventos = []
+    @contextmanager
+    def staging(itens):
+        eventos.append(('abriu', itens))
+        staged.write_bytes(itens[0][1])
+        try:
+            yield [staged]
+        finally:
+            eventos.append(('limpou',))
+            staged.unlink()
+    def executar(comando, ambiente):
+        eventos.append(('executou', staged.read_bytes(), ambiente['PASSE1_IMAGE_HASHES']))
+        assert comando[comando.index('--file') + 1] == str(staged)
+        return 0
+    args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=False, image=[str(imagem)], tarefa=['analise'])
+    monkeypatch.setattr(launcher, '_eh_windows', lambda: True)
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(win_image_adapter, 'preparar_imagens', side_effect=staging), \
+         patch.object(launcher, '_supervision', side_effect=executar):
+        assert launcher.iniciar([], agente=args) == 0
+    assert eventos[0] == ('abriu', [('.png', dados)])
+    assert eventos[1][0:2] == ('executou', dados)
+    assert eventos[2] == ('limpou',)
+    assert not staged.exists()

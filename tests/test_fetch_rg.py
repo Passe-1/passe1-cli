@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import io
+import os
 import tarfile
 from pathlib import Path
 
@@ -40,4 +41,5 @@ def test_extrai_executavel_e_licencas_autenticadas(tmp_path):
     assert (tmp_path / 'ripgrep-LICENSE-MIT').read_bytes() == b'mit'
     assert (tmp_path / 'ripgrep-UNLICENSE').read_bytes() == b'unlicense'
     assert (tmp_path / 'ripgrep-COPYING').read_bytes() == b'copying'
-    assert (tmp_path / 'rg').stat().st_mode & 0o111
+    if os.name == 'posix':
+        assert (tmp_path / 'rg').stat().st_mode & 0o111

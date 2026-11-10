@@ -100,6 +100,10 @@ def _instrucoes():
 
 
 
+def _eh_windows():
+    return os.name == "nt"
+
+
 def _supervision(comando, ambiente):
     """Mantém o terminal e espera o motor terminar antes de limpar anexos."""
     anterior_int = signal.getsignal(signal.SIGINT)
@@ -216,28 +220,40 @@ def iniciar(argv=None, *, agente=None, tui=False):
         comando.extend(agente.tarefa)
         pasta_imagens = None
         try:
-            if imagens_validadas:
-                if os.name == "nt":
-                    print("Anexos iniciais no Windows aguardam diretório temporário com proteção de acesso validada.")
-                    return 1
-                pasta_imagens = Path(tempfile.mkdtemp(prefix="passe1-cli-images-"))
-                extensoes = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
-                hashes_imagens = {}
-                for indice, parte in enumerate(imagens_validadas):
-                    cabecalho, codificado = parte["image_url"]["url"].split(",", 1)
-                    mime = cabecalho.removeprefix("data:").removesuffix(";base64")
-                    destino = pasta_imagens / (f"imagem-{indice}" + extensoes[mime])
-                    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-                    dados = base64.b64decode(codificado, validate=True)
-                    with os.fdopen(fd, "wb") as arquivo:
-                        arquivo.write(dados)
-                    hashes_imagens[str(destino)] = hashlib.sha256(dados).hexdigest()
-                    comando += ["--image" if tui else "--file", str(destino)]
-                ambiente["PASSE1_IMAGE_HASHES"] = json.dumps(hashes_imagens)
+            extensoes = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
+            itens = []
+            for parte in imagens_validadas:
+                cabecalho, codificado = parte["image_url"]["url"].split(",", 1)
+                mime = cabecalho.removeprefix("data:").removesuffix(";base64")
+                itens.append((extensoes[mime], base64.b64decode(codificado, validate=True)))
             if not agente.tarefa and not tui:
                 comando.append("--interactive")
-            if pasta_imagens is not None:
+            def executar_com_imagens(caminhos):
+                if len(caminhos) != len(itens):
+                    raise ValueError("Staging não retornou todas as imagens validadas.")
+                hashes = {}
+                for destino, (_, dados) in zip(caminhos, itens):
+                    hashes[str(destino)] = hashlib.sha256(dados).hexdigest()
+                    comando.extend(["--image" if tui else "--file", str(destino)])
+                ambiente["PASSE1_IMAGE_HASHES"] = json.dumps(hashes)
                 return _supervision(comando, ambiente)
+            if itens and _eh_windows():
+                from passe1_engine.win_image_adapter import preparar_imagens
+                try:
+                    with preparar_imagens(itens) as caminhos:
+                        return executar_com_imagens(caminhos)
+                except OSError as exc:
+                    raise ValueError("Não foi possível preparar ou limpar o staging privado de imagens no Windows.") from exc
+            if itens:
+                pasta_imagens = Path(tempfile.mkdtemp(prefix="passe1-cli-images-"))
+                caminhos = []
+                for indice, (extensao, dados) in enumerate(itens):
+                    destino = pasta_imagens / (f"imagem-{indice}" + extensao)
+                    fd = os.open(destino, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    with os.fdopen(fd, "wb") as arquivo:
+                        arquivo.write(dados)
+                    caminhos.append(destino)
+                return executar_com_imagens(caminhos)
             return os.execvpe(str(binario), comando, ambiente)
         finally:
             if pasta_imagens is not None:

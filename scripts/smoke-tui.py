@@ -63,7 +63,7 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
                 break
             texto = (texto + trecho)[-200000:]
             pronto = "commands" in texto.lower() or "comandos" in texto.lower()
-            if verificar_sandbox and pronto and not shell_iniciado:
+            if verificar_sandbox and pronto and not shell_iniciado and "sandbox" in texto.lower():
                 enviar("!")
                 time.sleep(0.2)
                 enviar(f"touch {shlex.quote(str(negado))}; printf 'SHELL_%s' DONE\r")

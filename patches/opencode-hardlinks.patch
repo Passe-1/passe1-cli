@@ -1504,7 +1504,7 @@ index 4f897dc8..66398c66 100644
        Effect.gen(function* () {
          const test = yield* TestInstance
 diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
-index c48c7517..a4add1f5 100644
+index c48c7517..03f9485b 100644
 --- a/packages/tui/src/component/prompt/index.tsx
 +++ b/packages/tui/src/component/prompt/index.tsx
 @@ -12,6 +12,7 @@ import type { CommandContext } from "@opentui/keymap"
@@ -1553,6 +1553,16 @@ index c48c7517..a4add1f5 100644
                  setTimeout(() => {
                    // setTimeout is a workaround and needs to be addressed properly
                    if (!input || input.isDestroyed) return
+@@ -1449,6 +1474,9 @@ export function Prompt(props: PromptProps) {
+                       <text fg={fadeColor(highlight(), agentMetaAlpha())}>
+                         {store.mode === "shell" ? "Shell" : Locale.titlecase(agent().name)}
+                       </text>
++                      <Show when={process.env.PASSE1_SANDBOX_COMMANDS === "1"}>
++                        <text fg={fadeColor(theme.warning, agentMetaAlpha())}>sandbox: shell</text>
++                      </Show>
+                       <Show when={store.mode === "normal" && local.permission.mode === "auto"}>
+                         <text fg={fadeColor(theme.textMuted, agentMetaAlpha())}>auto</text>
+                       </Show>
 diff --git a/packages/tui/src/context/args.tsx b/packages/tui/src/context/args.tsx
 index 9a528f2f..018f59a9 100644
 --- a/packages/tui/src/context/args.tsx

@@ -37,7 +37,12 @@ def main():
             def adulterar(comando, ambiente):
                 chamadas.append(True)
                 alvo = Path(comando[comando.index('--file') + 1])
-                alvo.write_bytes(b'\x89PNG\r\n\x1a\nSEGREDO_TROCADO')
+                try:
+                    alvo.write_bytes(b'\x89PNG\r\n\x1a\nSEGREDO_TROCADO')
+                except PermissionError:
+                    # Windows pode impedir a gravação pelo handle protegido;
+                    # o E2E de mmap exercita separadamente o hash do consumidor.
+                    return 1
                 return original(comando, ambiente)
             args = Namespace(base_url=None, model='glm-5.3-flash', session=None, sandbox=False, image=[str(arquivo)], tarefa=['analise'])
             with patch.object(launcher, '_supervision', side_effect=adulterar):

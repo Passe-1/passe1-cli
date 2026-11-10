@@ -133,3 +133,5 @@ A CI aceita o marcador `[windows-only]` em commits de desenvolvimento para execu
 Quando um formatador automático estiver habilitado, o Passe1 preserva o conteúdo aprovado e informa que a formatação automática foi omitida se não for possível preservar a configuração do projeto com segurança. O formatador pode ser executado manualmente no terminal após aprovação. A busca informa quando atinge o limite de 10.000 arquivos candidatos.
 
 No macOS e Linux, ao usar imagens, o CLI mantém cópias temporárias privadas até o motor encerrar e tenta removê-las ao sair. Uma interrupção abrupta do supervisor, como `SIGKILL`, pode deixar resíduos no diretório temporário do sistema; nesse caso, remova manualmente as pastas `passe1-cli-images-*` que não pertençam a processos ainda ativos.
+
+No Windows, a edição segura recusa arquivos acima de 64 MiB e arquivos abertos para gravação por outro programa; salve e feche o editor antes de tentar novamente. A recuperação de uma edição interrompida usa `passe1 recover CAMINHO` e exige confirmação em terminal.
