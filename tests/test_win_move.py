@@ -456,6 +456,7 @@ from passe1_engine import win_move
 journal = sys.argv[1]
 revisao = win_move._revisar_experimental(journal)
 def interromper(fd, dados):
+    os.lseek(fd, 0, os.SEEK_SET)
     os.write(fd, dados[:1])
     os.fsync(fd)
     os._exit(91)
