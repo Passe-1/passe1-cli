@@ -136,7 +136,7 @@ No macOS e Linux, ao usar imagens, o CLI mantém cópias temporárias privadas a
 
 No Windows, a edição segura recusa arquivos acima de 64 MiB e arquivos abertos para gravação por outro programa; salve e feche o editor antes de tentar novamente. A recuperação de uma edição interrompida usa `passe1 recover CAMINHO` e exige confirmação em terminal.
 
-As credenciais locais no Windows usam permissões restritas à conta atual. Se um arquivo antigo tiver permissões compartilhadas, o CLI preserva o arquivo e informa seu caminho; remova-o e faça login novamente para criar uma credencial protegida.
+As credenciais locais no Windows usam permissões restritas à conta atual. Se um arquivo antigo tiver permissões compartilhadas, o CLI preserva o arquivo e informa seu caminho; remova-o e faça login novamente para criar uma credencial protegida. Se uma atualização for interrompida, execute `passe1 recover-credential CAMINHO` em um terminal e confirme a recuperação indicada pelo CLI.
 
 Movimentações com `apply_patch` usam journal e guardam cópias em quarentena. Se uma operação for interrompida, use `passe1 recover-move CAMINHO_DO_JOURNAL` em um terminal para revisar o diff sanitizado e confirmar a recuperação. As cópias e o journal permanecem após a operação; a revisão integral recusa conteúdo acima de 1 MiB. No Windows, se a interrupção ocorrer antes do registro da identidade do arquivo temporário, o CLI preserva esse arquivo e informa seu caminho para inspeção e limpeza manual. O journal não garante proteção contra processos maliciosos do mesmo usuário, e um pseudoterminal não comprova presença humana.
 

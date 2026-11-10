@@ -3,6 +3,7 @@ import os
 import queue
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -14,7 +15,7 @@ pytestmark = pytest.mark.skipif(os.name != 'nt', reason='requer Windows e pywinp
 def _terminal(arquivo, pasta, ambiente, resposta, esperado):
     from winpty import PtyProcess
 
-    processo = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-credential', str(arquivo)], cwd=str(pasta), env=ambiente, dimensions=(30, 100))
+    processo = PtyProcess.spawn([sys.executable, '-I', '-X', 'utf8', '-m', 'passe1', 'recover-credential', str(arquivo)], cwd=tempfile.gettempdir(), env=ambiente, dimensions=(30, 100))
     mensagens = queue.Queue()
 
     def ler():
@@ -24,8 +25,10 @@ def _terminal(arquivo, pasta, ambiente, resposta, esperado):
         except (EOFError, OSError):
             mensagens.put(None)
 
-    threading.Thread(target=ler, daemon=True).start()
+    leitor = threading.Thread(target=ler, daemon=True)
+    leitor.start()
     texto, respondeu = '', False
+    encerrado = False
     limite = time.monotonic() + 30
     try:
         while time.monotonic() < limite:
@@ -41,9 +44,17 @@ def _terminal(arquivo, pasta, ambiente, resposta, esperado):
                 respondeu = True
             if respondeu and esperado in texto:
                 break
+        assert respondeu and esperado in texto
+        while processo.pty.isalive():
+            if time.monotonic() >= limite:
+                raise RuntimeError('Recovery de credencial não encerrou.')
+            time.sleep(0.1)
+        assert processo.exitstatus == (0 if resposta == 's' else 1)
+        encerrado = True
     finally:
-        processo.close(force=True)
-    assert respondeu and esperado in texto
+        processo.close(force=not encerrado)
+        leitor.join(timeout=10)
+        assert not leitor.is_alive()
     assert 'credencial-anterior-ficticia' not in texto and 'credencial-nova-ficticia' not in texto
 
 
