@@ -1102,17 +1102,27 @@ def cmd_recover_move(args: argparse.Namespace) -> int:
     try:
         if sys.platform == "win32":
             from passe1_engine import win_move
-            revisao = win_move._revisar_experimental(journal)
+            with win_move._abrir_plano_fixo(journal) as (_, _, plano):
+                destino_ausente = plano.get("destino_ausente") is True
+            if destino_ausente:
+                revisao = win_move._revisar_ausente_experimental(journal)
+                recuperar = win_move._recuperar_ausente_experimental
+            else:
+                revisao = win_move._revisar_experimental(journal)
+                recuperar = win_move._recuperar_experimental
             origem = _terminal_seguro(revisao["origem"]).replace("\n", r"\n")
             destino = _terminal_seguro(revisao["destino"]).replace("\n", r"\n")
             bruto_atual = revisao["conteudo_destino_atual"]
-            if len(bruto_atual) + len(revisao["conteudo_destino_anterior"].encode("utf-8")) + len(revisao["conteudo_origem"].encode("utf-8")) > 1024 * 1024:
+            anterior = revisao["conteudo_destino_anterior"]
+            if len(bruto_atual) + len((anterior or "").encode("utf-8")) + len(revisao["conteudo_origem"].encode("utf-8")) > 1024 * 1024:
                 raise ValueError("A prévia integral excede 1 MiB.")
             atual = bruto_atual.decode("utf-8", errors="backslashreplace")
-            anterior = revisao["conteudo_destino_anterior"]
-            diff = "".join(difflib.unified_diff(atual.splitlines(keepends=True), anterior.splitlines(keepends=True), fromfile="atual: " + destino, tofile="restaurado: " + destino))
+            diff = "".join(difflib.unified_diff(atual.splitlines(keepends=True), (anterior or "").splitlines(keepends=True), fromfile="atual: " + destino, tofile="restaurado: " + destino))
+            if anterior is None:
+                diff += f"Destino originalmente inexistente: {destino}\n"
             previa = f"Origem a restaurar: {origem}\n" + _terminal_seguro(revisao["conteudo_origem"]) + "\n" + _terminal_seguro(diff or "(sem alterações no destino)\n")
-            recuperar = win_move._recuperar_experimental
+            if revisao.get("requer_limpeza_manual"):
+                previa += "Stage preservado para inspeção e limpeza manual: " + _terminal_seguro(revisao["stage_caminho"]).replace("\n", r"\n") + "\n"
         elif os.name == "posix":
             from passe1_engine import secure_move
             revisao = secure_move.revisar_local(journal)
@@ -1129,7 +1139,9 @@ def cmd_recover_move(args: argparse.Namespace) -> int:
         if confirmacao not in {"s", "sim"}:
             print("Recuperação cancelada; quarentenas preservadas.")
             return 1
-        recuperar(journal, revisao["revisao"], confirmado=True)
+        resultado = recuperar(journal, revisao["revisao"], confirmado=True)
+        if isinstance(resultado, dict) and resultado.get("stage_preservado"):
+            print("Stage não apagado; inspecione e remova manualmente: " + _terminal_seguro(resultado["stage_caminho"]).replace("\n", r"\n"))
     except (EOFError, KeyboardInterrupt):
         print("Recuperação cancelada; quarentenas preservadas.")
         return 1

@@ -33,7 +33,7 @@ jobs:
       - if: runner.os == 'Windows'
         run: python -m pytest tests/test_win_secure.py tests/test_win_private.py tests/test_win_image_adapter.py tests/test_win_move.py tests/test_secure_stream.py -q
       - run: python scripts/build-engine.py
-      - run: python -m pip install build pytest httpx
+      - run: python -m pip install build pytest httpx websockets
       - run: python -m build --wheel
       - run: python -m pytest tests/test_engine.py tests/test_instalador.py tests/test_login_http.py tests/test_secure_stream.py tests/test_secure_write.py tests/test_secure_search.py tests/test_fetch_rg.py tests/test_quarentena.py tests/test_secure_move.py -q
       - id: installed_wheel
@@ -42,6 +42,7 @@ jobs:
       - if: runner.os == 'Windows'
         run: python scripts/smoke-windows-exec.py
       - run: python scripts/smoke-engine.py
+      - run: python -I scripts/smoke-installed-pty.py
       - run: python scripts/smoke-secure-grep.py
       - run: python scripts/smoke-image-integrity.py
       - run: python scripts/smoke-legacy.py

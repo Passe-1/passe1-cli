@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import io
 import os
 from unittest.mock import patch
@@ -81,6 +82,7 @@ def test_preview_windows_exige_confirmacao_e_sanitiza(tmp_path, monkeypatch, cap
     monkeypatch.setattr(passe1.sys, 'platform', 'win32')
     monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
     monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.setattr(win_move, '_abrir_plano_fixo', lambda _: contextlib.nullcontext((None, None, {})))
     args = argparse.Namespace(journal=str(tmp_path / 'journal'))
     with patch.object(win_move, '_revisar_experimental', return_value=revisao), \
          patch.object(win_move, '_recuperar_experimental') as recuperar, \
@@ -102,6 +104,24 @@ def test_preview_windows_mostra_bytes_invalidos_sem_ocultar(tmp_path, monkeypatc
     monkeypatch.setattr(passe1.sys, 'platform', 'win32')
     monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
     monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.setattr(win_move, '_abrir_plano_fixo', lambda _: contextlib.nullcontext((None, None, {})))
     with patch.object(win_move, '_revisar_experimental', return_value=revisao), patch('builtins.input', return_value='n'):
         assert passe1.cmd_recover_move(argparse.Namespace(journal=str(tmp_path / 'journal'))) == 1
     assert r'\xff' in capsys.readouterr().out
+
+
+def test_preview_windows_destino_ausente_preserva_stage(tmp_path, monkeypatch, capsys):
+    from passe1_engine import win_move
+    revisao = {'origem': 'origem', 'destino': 'destino', 'conteudo_origem': 'texto', 'conteudo_destino_anterior': None, 'conteudo_destino_atual': b'', 'revisao': 'token', 'requer_limpeza_manual': True, 'stage_caminho': 'stage\x1b[31m'}
+    monkeypatch.setattr(passe1.sys, 'platform', 'win32')
+    monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    monkeypatch.setattr(win_move, '_abrir_plano_fixo', lambda _: contextlib.nullcontext((None, None, {'destino_ausente': True})))
+    with patch.object(win_move, '_revisar_ausente_experimental', return_value=revisao), \
+         patch.object(win_move, '_recuperar_ausente_experimental', return_value={'stage_preservado': True, 'stage_caminho': revisao['stage_caminho']}) as recuperar, \
+         patch('builtins.input', return_value='sim'):
+        assert passe1.cmd_recover_move(argparse.Namespace(journal=str(tmp_path / 'journal'))) == 0
+        recuperar.assert_called_once()
+    saida = capsys.readouterr().out
+    assert 'Destino originalmente inexistente' in saida and 'Stage não apagado' in saida
+    assert '\x1b' not in saida

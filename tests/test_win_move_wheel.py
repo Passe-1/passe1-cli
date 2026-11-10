@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
@@ -169,3 +170,62 @@ win_move._mover_ausente_experimental(origem, destino, 'origem-preview', 'novo-pr
     assert origem.read_text(encoding='utf-8') == 'origem-preview'
     assert not destino.exists()
     assert adicional.read_text(encoding='utf-8') == 'preservar'
+
+
+def test_recover_move_sem_id_preserva_stage_para_inspecao_no_wheel(tmp_path):
+    from winpty import PtyProcess
+
+    origem = tmp_path / 'origem.txt'
+    destino = tmp_path / 'nova' / 'filha' / 'destino.txt'
+    origem.write_text('origem-preview', encoding='utf-8')
+    programa = '''
+import os, sys
+from passe1_engine import win_move, win_secure
+origem, destino, raiz = sys.argv[1:]
+vo = win_secure.snapshot(origem)['identidade']
+vd = win_secure.snapshot_pais(destino)
+gravar = win_move._gravar_handle
+def interromper(*args):
+    gravar(*args)
+    os._exit(91)
+win_move._gravar_handle = interromper
+win_move._mover_ausente_experimental(origem, destino, 'origem-preview', 'novo-preview', vo, vd, raiz)
+'''
+    resultado = subprocess.run([sys.executable, '-I', '-c', programa, str(origem), str(destino), str(tmp_path)], cwd=tmp_path, capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    journal = next(tmp_path.glob('move-*.journal'))
+    stage = next(destino.parent.glob('passe1-stage-*'))
+    assert not Path(str(journal) + '.stage').exists()
+    processo = PtyProcess.spawn([sys.executable, '-I', '-m', 'passe1', 'recover-move', str(journal)], cwd=str(tmp_path), dimensions=(30, 100))
+    mensagens = queue.Queue()
+
+    def ler():
+        try:
+            while True:
+                mensagens.put(processo.read())
+        except (EOFError, OSError):
+            mensagens.put(None)
+
+    threading.Thread(target=ler, daemon=True).start()
+    recebido, confirmado = '', False
+    limite = time.monotonic() + 30
+    try:
+        while time.monotonic() < limite:
+            try:
+                parte = mensagens.get(timeout=1)
+            except queue.Empty:
+                continue
+            if parte is None:
+                break
+            recebido += parte
+            if not confirmado and 'Restaurar o estado revisado?' in recebido:
+                assert 'limpeza manual' in recebido and stage.name in recebido
+                processo.write('s\r')
+                confirmado = True
+            if confirmado and 'Stage não apagado' in recebido:
+                break
+    finally:
+        processo.close(force=True)
+    assert confirmado and 'Stage não apagado' in recebido
+    assert origem.read_text(encoding='utf-8') == 'origem-preview'
+    assert not destino.exists() and stage.read_bytes() == b'novo-preview'
