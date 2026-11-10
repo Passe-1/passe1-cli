@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import os
 import queue
+import re
 import shlex
 import sys
 import tempfile
@@ -76,7 +77,15 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
                 enviar("Responda ao teste.\r")
                 enviado = True
             if enviado and "PASSE1_TUI_SUCESSO" in texto:
-                return
+                enviar("\x04")
+                fim = time.monotonic() + 15
+                while time.monotonic() < fim:
+                    try:
+                        if mensagens.get(timeout=1) is None:
+                            return
+                    except queue.Empty:
+                        continue
+                raise RuntimeError("TUI não encerrou após Ctrl+D.")
         raise RuntimeError("TUI não concluiu a conversa simulada dentro do prazo: " + texto[-4000:])
     finally:
         fechar()
@@ -96,6 +105,8 @@ def main():
                 temporarios = Path(pasta) / "temporarios"
                 temporarios.mkdir()
                 ambiente["TMPDIR"] = str(temporarios)
+                if os.name == "nt":
+                    ambiente["TEMP"] = ambiente["TMP"] = str(temporarios)
                 ambiente.update({"PASSE1_CONFIG_DIR": str(config), "PASSE1_BASE_URL": f"http://127.0.0.1:{servidor.server_port}/v1"})
                 modulo.Gateway.autorizada = False
                 testar_terminal(pasta, ambiente)
@@ -107,7 +118,8 @@ def main():
                 testar_terminal(pasta, ambiente, ["agent", "--model", "glm-5.3-flash", "--session", "teste", "--image", str(imagem)], aguardar_imagem=True)
                 if not any("image_url" in str(item) or "data:image/png" in str(item) for item in modulo.Gateway.requisicoes):
                     raise RuntimeError("TUI não enviou a imagem inicial ao gateway simulado.")
-                if list(temporarios.glob("passe1-cli-images-*")):
+                residuos = [item for item in temporarios.iterdir() if item.name.startswith("passe1-cli-images-") or re.fullmatch(r"passe1-[0-9a-f]{32}", item.name)]
+                if residuos:
                     raise RuntimeError("Staging de imagem não foi removido ao encerrar a TUI.")
                 if sys.platform == "darwin":
                     testar_terminal(pasta, ambiente, ["agent", "--sandbox"], verificar_sandbox=True)
