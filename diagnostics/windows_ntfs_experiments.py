@@ -247,4 +247,3 @@ def test_leitura_aceita_editor_aberto_e_impede_escrita_concorrente(tmp_path):
     finally:
         kernel.CloseHandle(editor)
     assert alvo.read_text(encoding='utf-8') == 'original'
-
