@@ -1,3 +1,38 @@
+diff --git a/bun.lock b/bun.lock
+index 481ef0a6..53f21575 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -335,7 +335,7 @@
+         "@parcel/watcher": "2.5.1",
+         "@silvia-odwyer/photon-node": "0.3.4",
+         "ai-gateway-provider": "3.2.0",
+-        "bun-pty": "0.4.8",
++        "bun-pty": "0.4.11",
+         "cross-spawn": "catalog:",
+         "diff": "catalog:",
+         "drizzle-orm": "catalog:",
+@@ -3238,7 +3238,7 @@
+ 
+     "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
+ 
+-    "bun-pty": ["bun-pty@0.4.8", "", {}, "sha512-rO70Mrbr13+jxHHHu2YBkk2pNqrJE5cJn29WE++PUr+GFA0hq/VgtQPZANJ8dJo6d7XImvBk37Innt8GM7O28w=="],
++    "bun-pty": ["bun-pty@0.4.11", "", {}, "sha512-DpBfXCoWbcDziqL4gT3sFw/O6vfe2Gm1LmsnjfGjpqNhmsPjBcVorTrRv7OVATsy88PiXfn486vp0w4x3/Q84g=="],
+ 
+     "bun-types": ["bun-types@1.3.13", "", { "dependencies": { "@types/node": "*" } }, "sha512-QXKeHLlOLqQX9LgYaHJfzdBaV21T63HhFJnvuRCcjZiaUDpbs5ED1MgxbMra71CsryN/1dAoXuJJJwIv/2drVA=="],
+ 
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 4a1ea279..ee4e56ef 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -102,7 +102,7 @@
+     "@silvia-odwyer/photon-node": "0.3.4",
+     "@openrouter/ai-sdk-provider": "2.9.0",
+     "ai-gateway-provider": "3.2.0",
+-    "bun-pty": "0.4.8",
++    "bun-pty": "0.4.11",
+     "cross-spawn": "catalog:",
+     "diff": "catalog:",
+     "drizzle-orm": "catalog:",
 diff --git a/packages/core/src/ripgrep/binary.ts b/packages/core/src/ripgrep/binary.ts
 index 762a8e61..f6f874f1 100644
 --- a/packages/core/src/ripgrep/binary.ts
@@ -209,7 +244,7 @@ index 0f85d44f..807a6953 100644
          )
          let index = 0
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 3f89a639..655b4e46 100644
+index 3f89a639..1257f21e 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -1,5 +1,5 @@
@@ -332,18 +367,7 @@ index 3f89a639..655b4e46 100644
                newContent: "",
                type: "delete",
                diff: deleteDiff,
-@@ -190,6 +209,10 @@ export const ApplyPatchTool = Tool.define(
-         }
-       }
- 
-+      if (process.platform === "win32" && fileChanges.some((change) => change.type === "move")) {
-+        return yield* Effect.fail(new Error("Movimentação segura ainda não está disponível no Windows; nenhum arquivo foi alterado."))
-+      }
-+
-       // Build per-file metadata for UI rendering (used for both permission and result)
-       const files = fileChanges.map((change) => ({
-         filePath: change.filePath,
-@@ -202,7 +225,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -202,7 +221,7 @@ export const ApplyPatchTool = Tool.define(
        }))
  
        // Check permissions if needed
@@ -352,7 +376,7 @@ index 3f89a639..655b4e46 100644
        yield* ctx.ask({
          permission: "edit",
          patterns: relativePaths,
-@@ -216,43 +239,73 @@ export const ApplyPatchTool = Tool.define(
+@@ -216,43 +235,73 @@ export const ApplyPatchTool = Tool.define(
  
        // Apply the changes
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
@@ -442,7 +466,7 @@ index 3f89a639..655b4e46 100644
            yield* events.publish(FileSystem.Event.Edited, { file: edited })
          }
        }
-@@ -268,7 +321,13 @@ export const ApplyPatchTool = Tool.define(
+@@ -268,7 +317,13 @@ export const ApplyPatchTool = Tool.define(
          const target = change.movePath ?? change.filePath
          yield* lsp.touchFile(target, "document")
        }
@@ -457,7 +481,7 @@ index 3f89a639..655b4e46 100644
  
        // Generate output summary
        const summaryLines = fileChanges.map((change) => {
-@@ -282,6 +341,8 @@ export const ApplyPatchTool = Tool.define(
+@@ -282,6 +337,8 @@ export const ApplyPatchTool = Tool.define(
          return `M ${path.relative(instance.worktree, target).replaceAll("\\", "/")}`
        })
        let output = `Success. Updated the following files:\n${summaryLines.join("\n")}`
@@ -615,10 +639,10 @@ index 6ea67124..56deaa7f 100644
            let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..0b90f0dd
+index 00000000..24e3289a
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,179 @@
+@@ -0,0 +1,178 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
@@ -781,7 +805,6 @@ index 00000000..0b90f0dd
 +}
 +
 +export async function moverSeguro(origem: string, destino: string, anteriorOrigem: string, anteriorDestino: string | null, novo: string, identidadeOrigem: Identidade, identidadeDestino: Identidade) {
-+  if (process.platform === "win32") throw new Error("Movimentação segura ainda não está disponível no Windows.")
 +  const python = process.env.PASSE1_SECURE_PYTHON
 +  const root = process.env.PASSE1_SECURE_ROOT
 +  const journalRoot = process.env.PASSE1_MOVE_ROOT
@@ -1096,25 +1119,13 @@ index da6e0f8d..aacfc1b3 100644
 +  { config: cfg },
 +)
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
-index 74203615..11543236 100644
+index 74203615..69a2011f 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
 +++ b/packages/opencode/test/tool/apply_patch.test.ts
-@@ -87,6 +87,147 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
+@@ -87,6 +87,133 @@ const expectFailure = <A, E, R>(effect: Effect.Effect<A, E, R>, message?: string
  const expectReadFailure = (filepath: string) => expectFailure(readText(filepath))
  
  describe("tool.apply_patch freeform", () => {
-+  it.instance("Windows recusa lote com move antes de alterar qualquer arquivo", () => Effect.gen(function* () {
-+    if (process.platform !== "win32") return
-+    const test = yield* TestInstance
-+    const origem = path.join(test.directory, "origem.txt")
-+    yield* writeText(origem, "origem\n")
-+    const { ctx } = makeCtx()
-+    const patchText = "*** Begin Patch\n*** Add File: novo.txt\n+novo\n*** Update File: origem.txt\n*** Move to: destino.txt\n@@\n-origem\n+resultado\n*** End Patch"
-+    yield* expectFailure(execute({ patchText }, ctx), "nenhum arquivo foi alterado")
-+    expect(yield* readText(origem)).toBe("origem\n")
-+    yield* expectReadFailure(path.join(test.directory, "novo.txt"))
-+  }))
-+
 +  it.instance("informa journal de move concluído se ação posterior falhar", () => Effect.gen(function* () {
 +    if (process.platform === "win32") return
 +    const test = yield* TestInstance
@@ -1138,7 +1149,6 @@ index 74203615..11543236 100644
 +  }))
 +
 +  it.instance("move para pasta nova e cria outro arquivo no mesmo lote", () => Effect.gen(function* () {
-+    if (process.platform === "win32") return
 +    const test = yield* TestInstance
 +    const origem = path.join(test.directory, "origem.txt")
 +    yield* writeText(origem, "origem\n")
@@ -1151,7 +1161,6 @@ index 74203615..11543236 100644
 +  }))
 +
 +  it.instance("move preserva destino se origem mudar após aprovação", () => Effect.gen(function* () {
-+    if (process.platform === "win32") return
 +    const test = yield* TestInstance
 +    const origem = path.join(test.directory, "origem.txt")
 +    const destino = path.join(test.directory, "destino.txt")
@@ -1247,7 +1256,7 @@ index 74203615..11543236 100644
    it.live("requires patchText", () =>
      Effect.gen(function* () {
        const { ctx } = makeCtx()
-@@ -311,10 +452,12 @@ describe("tool.apply_patch freeform", () => {
+@@ -311,10 +438,12 @@ describe("tool.apply_patch freeform", () => {
        const patchText =
          "*** Begin Patch\n*** Update File: old/name.txt\n*** Move to: renamed/dir/name.txt\n@@\n-from\n+new\n*** End Patch"
  
@@ -1796,38 +1805,3 @@ index 9a528f2f..018f59a9 100644
    agent?: string
    prompt?: string
    continue?: boolean
-diff --git a/bun.lock b/bun.lock
-index 481ef0a6..53f21575 100644
---- a/bun.lock
-+++ b/bun.lock
-@@ -335,7 +335,7 @@
-         "@parcel/watcher": "2.5.1",
-         "@silvia-odwyer/photon-node": "0.3.4",
-         "ai-gateway-provider": "3.2.0",
--        "bun-pty": "0.4.8",
-+        "bun-pty": "0.4.11",
-         "cross-spawn": "catalog:",
-         "diff": "catalog:",
-         "drizzle-orm": "catalog:",
-@@ -3238,7 +3238,7 @@
- 
-     "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
- 
--    "bun-pty": ["bun-pty@0.4.8", "", {}, "sha512-rO70Mrbr13+jxHHHu2YBkk2pNqrJE5cJn29WE++PUr+GFA0hq/VgtQPZANJ8dJo6d7XImvBk37Innt8GM7O28w=="],
-+    "bun-pty": ["bun-pty@0.4.11", "", {}, "sha512-DpBfXCoWbcDziqL4gT3sFw/O6vfe2Gm1LmsnjfGjpqNhmsPjBcVorTrRv7OVATsy88PiXfn486vp0w4x3/Q84g=="],
- 
-     "bun-types": ["bun-types@1.3.13", "", { "dependencies": { "@types/node": "*" } }, "sha512-QXKeHLlOLqQX9LgYaHJfzdBaV21T63HhFJnvuRCcjZiaUDpbs5ED1MgxbMra71CsryN/1dAoXuJJJwIv/2drVA=="],
- 
-diff --git a/packages/core/package.json b/packages/core/package.json
-index 4a1ea279..ee4e56ef 100644
---- a/packages/core/package.json
-+++ b/packages/core/package.json
-@@ -102,7 +102,7 @@
-     "@silvia-odwyer/photon-node": "0.3.4",
-     "@openrouter/ai-sdk-provider": "2.9.0",
-     "ai-gateway-provider": "3.2.0",
--    "bun-pty": "0.4.8",
-+    "bun-pty": "0.4.11",
-     "cross-spawn": "catalog:",
-     "diff": "catalog:",
-     "drizzle-orm": "catalog:",

@@ -753,6 +753,18 @@ def test_protocolo_json_recusa_origem_alterada_antes_de_criar_journal(tmp_path):
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_protocolo_json_nao_aceita_confirmacao_de_recuperacao(tmp_path):
+    import json
+    import subprocess
+    import sys
+
+    entrada = {'operacao': 'recuperar', 'journal': str(tmp_path / 'journal'), 'confirmado': True, 'revisao': 'forjada'}
+    resultado = subprocess.run([sys.executable, '-X', 'utf8', '-m', 'passe1_engine.secure_move'], input=json.dumps(entrada), cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, encoding='utf-8', timeout=60, check=False)
+    assert resultado.returncode != 0 and not resultado.stdout
+    assert 'somente no comando local' in resultado.stderr
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
 def test_raiz_de_journal_reparse_e_recusada_sem_alterar_arquivos(tmp_path):
     from passe1_engine import win_secure
 
