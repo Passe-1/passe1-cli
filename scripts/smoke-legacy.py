@@ -4,8 +4,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-import subprocess
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
@@ -53,7 +53,11 @@ def main():
             for primeira in (True, False):
                 resultado = executar(pasta, ambiente, imagem, primeira)
                 if resultado.returncode != 0 or "PASSE1_TUI_SUCESSO" not in resultado.stdout:
-                    raise RuntimeError("Agente não concluiu: " + resultado.stderr[-500:] + " " + resultado.stdout[-500:])
+                    raise RuntimeError(
+                        f"Agente não concluiu: etapa={'imagem' if primeira else 'retomada'}, "
+                        f"código={resultado.returncode}, posts={len(modulo.Gateway.requisicoes)}, "
+                        f"stdout={resultado.stdout[-1000:]!r}, stderr={resultado.stderr[-1000:]!r}"
+                    )
             corpos = modulo.Gateway.requisicoes
             if not modulo.Gateway.autorizada or not any("image_url" in json.dumps(c) for c in corpos):
                 raise RuntimeError("Gateway não recebeu a imagem autenticada. Estrutura: " + repr([(c.get("model"), [(m.get("role"), [(part.get("type"), list(part.keys())) for part in m.get("content", []) if isinstance(part, dict)] if isinstance(m.get("content"), list) else "texto") for m in c.get("messages", [])]) for c in corpos]))

@@ -38,13 +38,15 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
         encerramentos = (pexpect.EOF, EOFError, OSError)
 
     mensagens = queue.Queue()
+    erros_leitura = []
     def receber():
         while True:
             try:
                 mensagens.put(ler())
             except tempos:
                 continue
-            except encerramentos:
+            except encerramentos as exc:
+                erros_leitura.append(repr(exc))
                 mensagens.put(None)
                 return
     leitor = threading.Thread(target=receber, daemon=True)
@@ -86,7 +88,11 @@ def testar_terminal(pasta, ambiente, argumentos=(), aguardar_imagem=False, verif
                     except queue.Empty:
                         continue
                 raise RuntimeError("TUI não encerrou após Ctrl+D.")
-        raise RuntimeError("TUI não concluiu a conversa simulada dentro do prazo: " + texto[-4000:])
+        raise RuntimeError(
+            f"TUI não concluiu conversa: enviada={enviado}, leituras={erros_leitura!r}, "
+            f"exitstatus={getattr(processo, 'exitstatus', None)!r}, "
+            f"posts={len(modulo.Gateway.requisicoes)}, saída={texto[-4000:]!r}"
+        )
     finally:
         fechar()
 
