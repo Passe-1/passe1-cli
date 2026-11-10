@@ -425,7 +425,7 @@ def test_ancestral_do_journal_nao_pode_ser_trocado_durante_edicao(tmp_path, monk
     from passe1_engine import win_secure
     monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
     journal = win_secure._journal_path(tmp_path / 'alvo')
-    with win_secure._ancorar_journal(journal.parent), pytest.raises(OSError):
+    with win_secure._ancorar_journal(journal.parent, criar=True), pytest.raises(OSError):
         os.rename(journal.parent, journal.parent.with_name('mudou'))
     assert journal.parent.is_dir()
 
@@ -441,3 +441,18 @@ def test_journal_recusa_ancestral_symlink(tmp_path):
         pytest.skip('criação de symlink indisponível no runner')
     with pytest.raises((OSError, ValueError)), win_secure._ancorar_journal(alias):
         pass
+
+
+def test_journal_nao_cria_diretorio_atraves_de_symlink(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    fora = tmp_path / 'fora'
+    fora.mkdir()
+    alias = tmp_path / 'alias'
+    try:
+        alias.symlink_to(fora, target_is_directory=True)
+    except OSError:
+        pytest.skip('criação de symlink indisponível no runner')
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(alias / 'novo'))
+    with pytest.raises((OSError, ValueError)):
+        win_secure._guardar_journal(tmp_path / 'alvo', 'segredo', (1, 2, 3))
+    assert not (fora / 'novo').exists()

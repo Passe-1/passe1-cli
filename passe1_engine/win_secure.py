@@ -40,13 +40,12 @@ def _dpapi(dados: bytes, proteger: bool) -> bytes:
 def _journal_path(caminho):
     base = Path(os.environ.get("PASSE1_CONFIG_DIR") or Path.home() / ".config" / "passe1")
     diretorio = base / "recovery"
-    diretorio.mkdir(parents=True, exist_ok=True)
     chave = hashlib.sha256(os.path.normcase(os.path.abspath(caminho)).encode("utf-8")).hexdigest()
     return diretorio / (chave + ".dpapi")
 
 
 @contextlib.contextmanager
-def _ancorar_journal(diretorio):
+def _ancorar_journal(diretorio, criar=False):
     """Mantém cada ancestral aberto sem compartilhar exclusão durante a operação."""
     import ctypes
     from ctypes import wintypes
@@ -57,6 +56,15 @@ def _ancorar_journal(diretorio):
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.GetFileInformationByHandleEx.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    ntdll = ctypes.WinDLL("ntdll")
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [("Length", wintypes.USHORT), ("MaximumLength", wintypes.USHORT), ("Buffer", wintypes.LPWSTR)]
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [("Length", wintypes.ULONG), ("RootDirectory", wintypes.HANDLE), ("ObjectName", ctypes.POINTER(UnicodeString)), ("Attributes", wintypes.ULONG), ("SecurityDescriptor", ctypes.c_void_p), ("SecurityQualityOfService", ctypes.c_void_p)]
+    class IoStatus(ctypes.Structure):
+        _fields_ = [("Status", ctypes.c_void_p), ("Information", ctypes.c_size_t)]
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatus), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
     class Atributos(ctypes.Structure):
         _fields_ = [("atributos", wintypes.DWORD), ("tag", wintypes.DWORD)]
     handles = []
@@ -67,7 +75,24 @@ def _ancorar_journal(diretorio):
                 atual /= componente
             handle = kernel.CreateFileW(str(atual), 0x100080, 3, None, 3, 0x02200000, None)
             if handle == wintypes.HANDLE(-1).value:
-                raise ctypes.WinError(ctypes.get_last_error())
+                erro = ctypes.get_last_error()
+                if not criar or componente is None or erro not in (2, 3):
+                    raise ctypes.WinError(erro)
+                # Ancestrais anteriores continuam abertos sem share DELETE;
+                # abre o pai para criar somente o componente ausente.
+                pai = kernel.CreateFileW(str(atual.parent), 0x100084, 3, None, 3, 0x02200000, None)
+                if pai == wintypes.HANDLE(-1).value:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                handles.append(pai)
+                buffer = ctypes.create_unicode_buffer(componente)
+                tamanho = len(componente.encode("utf-16-le"))
+                nome = UnicodeString(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+                atributos = ObjectAttributes(ctypes.sizeof(ObjectAttributes), pai, ctypes.pointer(nome), 0x40 | 0x1000, None, None)
+                novo, ios = wintypes.HANDLE(), IoStatus()
+                status = ntdll.NtCreateFile(ctypes.byref(novo), 0x100080, ctypes.byref(atributos), ctypes.byref(ios), None, 0, 3, 3, 0x00200021, None, 0)
+                if status < 0:
+                    raise OSError(f"NtCreateFile do diretório falhou: 0x{status & 0xffffffff:08x}")
+                handle = novo.value
             handles.append(handle)
             info = Atributos()
             if not kernel.GetFileInformationByHandleEx(handle, 9, ctypes.byref(info), ctypes.sizeof(info)):
@@ -82,7 +107,7 @@ def _ancorar_journal(diretorio):
 
 def _guardar_journal(caminho, conteudo, identidade):
     arquivo = _journal_path(caminho)
-    with _ancorar_journal(arquivo.parent):
+    with _ancorar_journal(arquivo.parent, criar=True):
         return _guardar_journal_ancorado(arquivo, caminho, conteudo, identidade)
 
 
@@ -324,7 +349,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
             if not kernel.GetFileInformationByHandle(arquivo, ctypes.byref(info)):
                 raise ctypes.WinError(ctypes.get_last_error())
             identidade = (info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow)
-            with _ancorar_journal(_journal_path(alvo).parent):
+            with _ancorar_journal(_journal_path(alvo).parent, criar=recuperacao is None):
                 if recuperacao is not None:
                     if list(identidade) != recuperacao.get("identidade"):
                         raise ValueError("Arquivo atual não corresponde ao journal.")
