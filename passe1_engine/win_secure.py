@@ -45,19 +45,47 @@ def _journal_path(caminho):
 
 
 def _guardar_journal(caminho, conteudo, identidade):
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
     arquivo = _journal_path(caminho)
     dados = json.dumps({"caminho": os.path.abspath(caminho), "conteudo": conteudo, "identidade": identidade}, ensure_ascii=False).encode("utf-8")
     cifrado = _dpapi(dados, True)
-    fd = os.open(arquivo, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
+    kernel.CreateFileW.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.SetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    handle = kernel.CreateFileW(str(arquivo), 0x40010080, 1, None, 1, 0x00200000, None)
+    if handle == wintypes.HANDLE(-1).value:
+        raise ctypes.WinError(ctypes.get_last_error())
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(cifrado)
-            f.flush()
-            os.fsync(f.fileno())
-            info = os.fstat(f.fileno())
-            identidade = (info.st_dev, info.st_ino)
+        fd = msvcrt.open_osfhandle(handle, os.O_WRONLY | os.O_BINARY)
+    except BaseException:
+        excluir = wintypes.BOOL(True)
+        kernel.SetFileInformationByHandle(handle, 4, ctypes.byref(excluir), ctypes.sizeof(excluir))
+        kernel.CloseHandle(handle)
+        raise
+    try:
+        pos = 0
+        while pos < len(cifrado):
+            n = os.write(fd, cifrado[pos:])
+            if n <= 0:
+                raise OSError("Gravação do journal incompleta.")
+            pos += n
+        os.fsync(fd)
+        info = os.fstat(fd)
+        if not info.st_ino:
+            raise ValueError("Sistema não oferece identidade confiável para o journal.")
+        identidade = (info.st_dev, info.st_ino)
     except BaseException as exc:
-        raise OSError(f"Não foi possível gravar journal; arquivo original não foi alterado. Verifique {arquivo}.") from exc
+        excluir = wintypes.BOOL(True)
+        if not kernel.SetFileInformationByHandle(msvcrt.get_osfhandle(fd), 4, ctypes.byref(excluir), ctypes.sizeof(excluir)):
+            raise OSError(f"Journal incompleto preservado em {arquivo}; o original não foi alterado.") from exc
+        raise
+    finally:
+        os.close(fd)
     return arquivo, identidade
 
 
@@ -80,7 +108,7 @@ def _abrir_journal(arquivo):
         raise
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
+        if not stat.S_ISREG(info.st_mode) or not info.st_ino or info.st_nlink != 1 or getattr(info, "st_file_attributes", 0) & 0x400:
             raise ValueError("Journal inválido ou possui links.")
         return fd, (info.st_dev, info.st_ino)
     except BaseException:

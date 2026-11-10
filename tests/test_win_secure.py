@@ -394,3 +394,28 @@ def test_edicao_acima_do_limite_preserva_original(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match='limite'):
         win_secure.substituir(alvo, 'antes', 'x')
     assert alvo.read_text(encoding='utf-8') == 'antes'
+
+
+def test_limpeza_journal_recusa_hardlink(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    journal, identidade = win_secure._guardar_journal(tmp_path / 'alvo.txt', 'segredo', (1, 2, 3))
+    alias = journal.with_name('alias')
+    os.link(journal, alias)
+    with pytest.raises(ValueError, match='links'):
+        win_secure._apagar_journal(journal, identidade)
+    assert journal.exists() and alias.exists()
+
+
+def test_falha_fsync_remove_journal_incompleto(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('original', encoding='utf-8')
+    def falhar(_fd):
+        raise OSError('fsync simulado')
+    monkeypatch.setattr(win_secure.os, 'fsync', falhar)
+    with pytest.raises(OSError, match='fsync simulado'):
+        win_secure._guardar_journal(alvo, 'original', (1, 2, 3))
+    assert not win_secure._journal_path(alvo).exists()
+    assert alvo.read_text(encoding='utf-8') == 'original'
