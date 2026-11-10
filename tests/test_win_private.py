@@ -150,3 +150,77 @@ def test_staging_recusa_modificacao_entre_handles(tmp_path, monkeypatch):
         pytest.fail('A imagem modificada não pode ser entregue.')
     assert alterado
     assert not list(tmp_path.glob('passe1-*'))
+
+
+def test_mapeamento_gravavel_na_janela_nao_engana_digest_do_consumidor(tmp_path, monkeypatch):
+    import ctypes
+    import hashlib
+    import mmap
+    import shutil
+
+    from passe1_engine.win_private import staging
+
+    carregar = ctypes.WinDLL
+    mapas = []
+    dados = b'conteudo-teste'
+    entregue = False
+
+    class Funcao:
+        def __init__(self, original, depois):
+            self.original, self.depois = original, depois
+
+        def __call__(self, *args):
+            resultado = self.original(*args)
+            self.depois()
+            return resultado
+
+        @property
+        def argtypes(self):
+            return self.original.argtypes
+
+        @argtypes.setter
+        def argtypes(self, valor):
+            self.original.argtypes = valor
+
+    class Kernel:
+        def __init__(self, original):
+            self.original, self.gravado = original, False
+            self.WriteFile = Funcao(original.WriteFile, self.marcar)
+            self.CloseHandle = Funcao(original.CloseHandle, self.mapear)
+
+        def __getattr__(self, nome):
+            return getattr(self.original, nome)
+
+        def marcar(self):
+            self.gravado = True
+
+        def mapear(self):
+            if self.gravado and not mapas:
+                arquivo = next(tmp_path.glob('passe1-*/*.png'))
+                with arquivo.open('r+b') as aberto:
+                    mapas.append(mmap.mmap(aberto.fileno(), 0, access=mmap.ACCESS_WRITE))
+
+    def carregar_interceptado(nome, *args, **kwargs):
+        biblioteca = carregar(nome, *args, **kwargs)
+        return Kernel(biblioteca) if nome == 'kernel32' else biblioteca
+
+    monkeypatch.setattr(ctypes, 'WinDLL', carregar_interceptado)
+    try:
+        try:
+            with staging([('.png', dados)], parent=tmp_path) as caminhos:
+                entregue = True
+                mapas[0][0] = ord('X')
+                consumido = caminhos[0].read_bytes()
+                assert hashlib.sha256(consumido).digest() != hashlib.sha256(dados).digest()
+                mapas[0].close()
+        except OSError:
+            # Um mapeamento ativo pode impedir a abertura segura ou a limpeza.
+            # Nesse caso não houve consumo; a falha deve preceder o yield.
+            assert not entregue
+    finally:
+        for mapa in mapas:
+            if not mapa.closed:
+                mapa.close()
+        for pasta in tmp_path.glob('passe1-*'):
+            shutil.rmtree(pasta)
+    assert mapas
