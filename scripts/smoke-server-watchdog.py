@@ -3,7 +3,6 @@ import importlib.util
 import json
 import os
 import shlex
-import signal
 import sys
 import tempfile
 import threading
@@ -44,7 +43,6 @@ def main():
     threading.Thread(target=servidor_gateway.serve_forever, daemon=True).start()
     anterior = Path.cwd()
     processo = None
-    grupo = None
     try:
         with tempfile.TemporaryDirectory() as pasta:
             os.chdir(pasta)
@@ -81,7 +79,6 @@ def main():
                     time.sleep(0.05)
                 if not pronto.exists():
                     raise RuntimeError("Ferramenta não iniciou antes do prazo.")
-                grupo = os.getpgid(int(pronto.read_text()))
                 processo.kill()
                 processo.wait(timeout=10)
                 time.sleep(6)
@@ -92,11 +89,6 @@ def main():
         if processo is not None and processo.poll() is None:
             processo.kill()
             processo.wait(timeout=10)
-        if grupo is not None:
-            try:
-                os.killpg(grupo, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                pass
         os.chdir(anterior)
         servidor_gateway.shutdown()
         servidor_gateway.server_close()
