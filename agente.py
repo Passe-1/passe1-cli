@@ -4,12 +4,13 @@ from __future__ import annotations
 import difflib
 import json
 import os
-import subprocess
-import tempfile
 import uuid
 from pathlib import Path
 
 import httpx
+
+import arquivos_seguros
+from terminal import seguro as _terminal_seguro
 
 LIMITE = 30000
 SISTEMA = ("Você é um agente de programação. Trabalhe no projeto atual usando as ferramentas. "
@@ -55,11 +56,12 @@ def _arquivo_sensivel(caminho: Path) -> bool:
             or nome.endswith((".env", ".pem", ".key", ".p12", ".pfx", ".keystore")))
 
 
-def executar_ferramenta(raiz: Path, nome: str, args: dict, ler=input) -> str:
+def executar_ferramenta(raiz: Path, nome: str, args: dict, ler=input, usar_sandbox=False) -> str:
     try:
         if not isinstance(args, dict):
             return "Erro: argumentos devem ser um objeto."
         if nome == "buscar":
+            arquivos_seguros._disponivel()
             busca = args["texto"]
             if not isinstance(busca, str) or not busca or len(busca) > 500:
                 return "Erro: texto de busca inválido."
@@ -73,31 +75,41 @@ def executar_ferramenta(raiz: Path, nome: str, args: dict, ler=input) -> str:
                     try:
                         if arquivo.is_symlink() or _arquivo_sensivel(arquivo.relative_to(raiz)) or arquivo.stat().st_size > 1_000_000:
                             continue
-                        with arquivo.open(encoding="utf-8") as conteudo:
-                            for numero, linha in enumerate(conteudo, 1):
-                                if busca in linha:
-                                    resultados.append(f"{arquivo.relative_to(raiz)}:{numero}:{linha.rstrip()[:500]}")
-                                    if len(resultados) >= 100:
-                                        return "\n".join(resultados)[:LIMITE] + "\n[busca limitada]"
-                    except (OSError, UnicodeError):
+                        conteudo, _ = arquivos_seguros.ler(raiz, arquivo, limite=1_000_000)
+                        for numero, linha in enumerate(conteudo.splitlines(), 1):
+                            if busca in linha:
+                                resultados.append(f"{arquivo.relative_to(raiz)}:{numero}:{linha.rstrip()[:500]}")
+                                if len(resultados) >= 100:
+                                    return "\n".join(resultados)[:LIMITE] + "\n[busca limitada]"
+                    except (OSError, UnicodeError, ValueError, RuntimeError):
                         continue
             return "\n".join(resultados)[:LIMITE] or "Nenhuma ocorrência encontrada."
         if nome == "terminal":
             comando = args["comando"]
             if not isinstance(comando, str) or not comando.strip():
                 return "Erro: comando inválido."
-            print(f"Comando proposto (pode alterar arquivos e acessar a rede):\n{comando}")
+            aviso = "sandbox somente leitura: escrita e rede bloqueadas; leitura externa permitida" if usar_sandbox else "pode alterar arquivos e acessar a rede"
+            print(f"Comando proposto ({aviso}):\n{_terminal_seguro(comando)}")
             if not _aprovar("Executar? [s/N] ", ler):
                 return "Execução recusada pelo usuário."
-            with tempfile.TemporaryFile() as saida:
+            if usar_sandbox:
+                import sandbox
                 try:
-                    resultado = subprocess.run(comando, shell=True, check=False, cwd=raiz, stdout=saida,
-                                               stderr=subprocess.STDOUT, timeout=120)
-                except subprocess.TimeoutExpired:
+                    codigo, texto, expirou = sandbox.executar(comando, raiz, timeout=120, limite=LIMITE)
+                except (RuntimeError, OSError, ValueError) as exc:
+                    return f"Sandbox indisponível: {exc}"
+                if expirou:
                     return "Comando interrompido após 120 segundos."
-                saida.seek(0)
-                texto = saida.read(LIMITE + 1).decode("utf-8", errors="replace")
-            return f"Código de saída: {resultado.returncode}\n{texto[:LIMITE]}" + ("\n[saída truncada]" if len(texto) > LIMITE else "")
+                return f"Código de saída: {codigo}\n{texto}"
+            import processos
+            try:
+                codigo, texto, expirou = processos.executar(comando, raiz, timeout=120, limite=LIMITE, shell=True)
+            except (RuntimeError, OSError, ValueError) as exc:
+                return f"Não foi possível executar o comando: {exc}"
+            if expirou:
+                return "Comando interrompido após 120 segundos."
+            return f"Código de saída: {codigo}\n{texto}"
+
         if nome not in {"listar", "ler_arquivo", "editar_arquivo", "criar_arquivo"}:
             return "Erro: ferramenta desconhecida."
         caminho_solicitado = raiz / args["caminho"]
@@ -109,51 +121,55 @@ def executar_ferramenta(raiz: Path, nome: str, args: dict, ler=input) -> str:
             return "\n".join(entradas)[:LIMITE]
         if (nome in {"ler_arquivo", "editar_arquivo"}
                 and (_arquivo_sensivel(caminho.relative_to(raiz.resolve())) or _arquivo_sensivel(caminho_solicitado.relative_to(raiz)))
-                and not _aprovar(f"Ler arquivo sensível {caminho.relative_to(raiz.resolve())} e enviar ao modelo? [s/N] ", ler)):
+                and not _aprovar(f"Ler arquivo sensível {_terminal_seguro(caminho.relative_to(raiz.resolve()))} e enviar ao modelo? [s/N] ", ler)):
             return "Leitura de arquivo sensível recusada pelo usuário."
         if nome == "ler_arquivo":
-            with caminho.open(encoding="utf-8") as arquivo:
-                texto = arquivo.read(LIMITE + 1)
-            return texto[:LIMITE] + ("\n[arquivo truncado]" if len(texto) > LIMITE else "")
+            texto, _ = arquivos_seguros.ler(raiz, caminho_solicitado, limite=LIMITE)
+            return texto
         if nome == "criar_arquivo":
             if caminho.exists():
                 return "Erro: arquivo já existe."
             anterior, novo = "", args["conteudo"]
+            versao = None
         else:
-            anterior = caminho.read_text(encoding="utf-8")
+            anterior, versao = arquivos_seguros.ler(raiz, caminho_solicitado)
             antigo, substituto = args["antigo"], args["novo"]
             if not antigo or anterior.count(antigo) != 1:
                 return "Erro: texto original deve ocorrer exatamente uma vez."
             novo = anterior.replace(antigo, substituto, 1)
         diff = "".join(difflib.unified_diff(anterior.splitlines(keepends=True), novo.splitlines(keepends=True), fromfile=str(caminho), tofile=str(caminho)))
-        print(f"Alteração proposta:\n{diff}")
+        print(f"Alteração proposta:\n{_terminal_seguro(diff)}")
         if not _aprovar("Aplicar alteração? [s/N] ", ler):
             return "Alteração recusada pelo usuário."
         if nome == "criar_arquivo":
-            caminho.parent.mkdir(parents=True, exist_ok=True)
-            with caminho.open("x", encoding="utf-8") as arquivo:
-                arquivo.write(novo)
+            arquivos_seguros.criar(raiz, caminho_solicitado, novo)
         else:
-            if caminho.read_text(encoding="utf-8") != anterior:
-                return "Erro: arquivo mudou durante a aprovação."
-            caminho.write_text(novo, encoding="utf-8")
+            arquivos_seguros.editar(raiz, caminho_solicitado, versao, novo)
         return "Alteração aplicada."
-    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError, RuntimeError) as exc:
         return f"Erro na ferramenta: {exc}"
 
 
-def executar(base, chave, modelo, tarefa, cliente, ler=input, interativo=False, imagens=None):
+def executar(base, chave, modelo, tarefa, cliente, ler=input, interativo=False, imagens=None, sessao=None, usar_sandbox=False):
     raiz = Path.cwd().resolve()
     sistema = SISTEMA
     instrucoes = raiz / "AGENTS.md"
     try:
         if instrucoes.is_file() and instrucoes.resolve().is_relative_to(raiz):
-            with instrucoes.open(encoding="utf-8") as arquivo:
-                sistema += "\n\nInstruções do projeto (AGENTS.md):\n" + arquivo.read(LIMITE)
-    except (OSError, UnicodeError):
+            conteudo, _ = arquivos_seguros.ler(raiz, instrucoes, limite=LIMITE)
+            sistema += "\n\nInstruções do projeto (AGENTS.md):\n" + conteudo
+    except (OSError, UnicodeError, ValueError, RuntimeError):
         print("Não foi possível ler AGENTS.md.")
     mensagens = [{"role": "system", "content": sistema}]
     conversa_id = uuid.uuid4().hex
+    if sessao:
+        dados = sessao.carregar()
+        if dados:
+            historico, conversa_id = dados
+            mensagens.extend(historico)
+            print("Sessão retomada; histórico local pode conter dados sensíveis.")
+        else:
+            print("Sessão será salva localmente; histórico pode conter dados sensíveis.")
     if tarefa:
         conteudo = [{"type": "text", "text": tarefa}, *imagens] if imagens else tarefa
         mensagens.append({"role": "user", "content": conteudo})
@@ -175,6 +191,8 @@ def executar(base, chave, modelo, tarefa, cliente, ler=input, interativo=False, 
                     if tarefa == "/limpar":
                         mensagens = mensagens[:1]
                         conversa_id = uuid.uuid4().hex
+                        if sessao:
+                            sessao.salvar([], conversa_id)
                         print("Contexto limpo.")
                         continue
                     if not tarefa:
@@ -191,29 +209,63 @@ def executar(base, chave, modelo, tarefa, cliente, ler=input, interativo=False, 
                 if resposta.status_code != 200:
                     return False, f"Gateway respondeu HTTP {resposta.status_code}: {resposta.text[:1000]}"
                 corpo = resposta.json()
-                mensagem = corpo["choices"][0]["message"]
+                escolha = corpo["choices"][0]
+                if not isinstance(escolha, dict):
+                    raise TypeError("Escolha inválida.")
+                motivo = escolha.get("finish_reason")
+                if motivo == "length":
+                    return False, "Resposta incompleta: limite de tokens atingido."
+                if motivo not in (None, "stop", "tool_calls", "function_call"):
+                    return False, "Resposta interrompida pelo modelo."
+                mensagem = escolha["message"]
+                if not isinstance(mensagem, dict):
+                    raise TypeError("Mensagem inválida.")
                 uso = corpo.get("usage") or {}
+                if not isinstance(uso, dict):
+                    raise TypeError("Uso inválido.")
                 detalhes = uso.get("prompt_tokens_details") or {}
+                if not isinstance(detalhes, dict):
+                    raise TypeError("Detalhes de uso inválidos.")
                 if isinstance(detalhes.get("cached_tokens"), int):
                     print(f"Cache: {detalhes['cached_tokens']} tokens de entrada reutilizados.")
                 chamadas = mensagem.get("tool_calls") or []
+                if (motivo == "tool_calls" and not chamadas) or (motivo == "stop" and chamadas) or motivo == "function_call":
+                    return False, "Resposta inconsistente do modelo sobre ferramentas."
                 if mensagem.get("content"):
-                    print(mensagem["content"])
+                    print(_terminal_seguro(mensagem["content"]))
                 if not chamadas:
                     if not mensagem.get("content"):
                         return False, "O modelo não retornou uma resposta nem chamadas de ferramentas."
                     mensagens.append(mensagem)
+                    if sessao:
+                        sessao.salvar(mensagens[1:], conversa_id)
                     continue
+                if not isinstance(chamadas, list) or any(
+                    not isinstance(c, dict) or not isinstance(c.get("id"), str)
+                    or not c["id"] or not isinstance(c.get("function"), dict)
+                    or not isinstance(c["function"].get("name"), str)
+                    or "arguments" not in c["function"] for c in chamadas
+                ) or len({c["id"] for c in chamadas}) != len(chamadas):
+                    return False, "O modelo retornou chamadas de ferramentas inválidas."
                 mensagens.append(mensagem)
-                for chamada in chamadas:
+                inicio_resultados = len(mensagens)
+                if sessao:
+                    for chamada in chamadas:
+                        mensagens.append({"role": "tool", "tool_call_id": chamada["id"], "content": "Estado incerto: a execução pode ter sido interrompida ou não iniciada. Verifique o estado antes de repetir qualquer ação."})
+                    sessao.salvar(mensagens[1:], conversa_id)
+                for indice, chamada in enumerate(chamadas):
                     funcao = chamada["function"]
                     try:
                         argumentos = json.loads(funcao["arguments"])
                     except (ValueError, TypeError):
                         resultado = "Erro: argumentos JSON inválidos."
                     else:
-                        print(f"Ferramenta: {funcao['name']}")
-                        resultado = executar_ferramenta(raiz, funcao["name"], argumentos, ler)
-                    mensagens.append({"role": "tool", "tool_call_id": chamada["id"], "content": resultado})
+                        print(f"Ferramenta: {_terminal_seguro(funcao['name'])}")
+                        resultado = executar_ferramenta(raiz, funcao["name"], argumentos, ler, usar_sandbox=usar_sandbox)
+                    if sessao:
+                        mensagens[inicio_resultados + indice]["content"] = resultado
+                        sessao.salvar(mensagens[1:], conversa_id)
+                    else:
+                        mensagens.append({"role": "tool", "tool_call_id": chamada["id"], "content": resultado})
     except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError) as exc:
         return False, f"Falha ao conversar com o gateway: {type(exc).__name__}."

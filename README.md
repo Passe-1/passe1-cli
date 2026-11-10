@@ -37,7 +37,13 @@ passe1 models
 
 # agente interativo
 passe1 agent
+# no macOS: bloqueia escrita e rede dos comandos aprovados
+passe1 agent --sandbox
 # /limpar inicia outro contexto; /sair encerra
+
+# salvar e retomar explicitamente a mesma sessão
+passe1 agent --session projeto "investigue o bug"
+passe1 agent --session projeto "continue"
 
 # conversar (uma pergunta, stdin ou REPL; /sair encerra, /limpar zera)
 passe1 chat "explique closures em 3 linhas"
@@ -107,9 +113,14 @@ O gateway que serve o instalador mantém atualmente uma cópia do CLI. Alteraç�
   Arquivos com nomes sensíveis conhecidos, como `.env` e chaves privadas, exigem
   aprovação antes da leitura e são ignorados pela busca. Essa identificação não
   encontra todos os segredos possíveis; revise seu projeto e os comandos aprovados.
+- `agent --sandbox` bloqueia escrita em qualquer local e rede para comandos aprovados no macOS; testes ou builds que precisam gravar arquivos podem falhar. Não bloqueia leitura de arquivos externos nem acesso a variáveis de ambiente; não o use como proteção de segredos. Em plataformas sem suporte, essa opção é recusada. Processos que se desvinculam do grupo podem continuar após o comando. Sem a opção, comandos aprovados não têm esse isolamento.
 - O agente mantém a conversa e as ferramentas estáveis entre chamadas e envia
   um ID de conversa ao gateway para favorecer afinidade de cache. Quando o
   modelo informa tokens reutilizados, o CLI mostra esse número; a taxa efetiva
   depende do modelo e do provedor e não é garantida.
 - `setup codex` pede `export PASSE1_API_KEY=$(cat ~/.config/passe1/key)` no
   terminal.
+
+A opção `--session` salva mensagens, saídas de ferramentas e imagens localmente em `~/.config/passe1/sessions/`, com acesso restrito ao usuário. Esse histórico pode conter dados sensíveis; remova o arquivo da sessão quando não precisar mais. Sessões são vinculadas ao projeto, gateway, modelo e chave usados na criação. A retomada de sessões está disponível em macOS e Linux.
+
+As operações seguras de arquivo exigem recursos POSIX; atualmente o comando `agent` não está disponível no Windows. O `chat` continua disponível. A revalidação reduz, mas não elimina, corridas causadas por outro processo local que altere diretórios simultaneamente.
