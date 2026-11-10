@@ -43,11 +43,11 @@ def main():
         with tempfile.TemporaryDirectory() as pasta:
             config = Path(pasta) / "config"
             config.mkdir()
-            (config / "key").write_text("sk-passe1-fixture\n", encoding="utf-8")
             imagem = Path(pasta) / "figura.png"
             imagem.write_bytes(png())
             ambiente = os.environ.copy()
             ambiente.update({"PASSE1_CONFIG_DIR": str(config), "PASSE1_BASE_URL": f"http://127.0.0.1:{servidor.server_port}/v1"})
+            subprocess.run([sys.executable, "-I", "-X", "utf8", "-c", "import passe1; passe1._guardar_chave('sk-passe1-fixture')"], cwd=pasta, env=ambiente, check=True, timeout=30)
             modulo.Gateway.autorizada = False
             modulo.Gateway.requisicoes = []
             for primeira in (True, False):
