@@ -32,6 +32,26 @@ def test_limite_de_conteudo_e_explicito(monkeypatch):
         win_move._digest(None)
 
 
+def test_journal_recusa_troca_de_conteudo_identidade_ou_pais(tmp_path):
+    plano = {
+        'versao': 1, 'origem': str(tmp_path / 'a'), 'destino': str(tmp_path / 'b'),
+        'id_origem': ['1', '2', '3'], 'id_destino': ['1', '2', '4'],
+        'pais_origem': [['1', '0', '2']], 'pais_destino': [['1', '0', '2']],
+    }
+    for nome, texto in [('origem', 'origem'), ('destino', 'destino'), ('novo', 'novo')]:
+        plano['conteudo_' + nome] = texto
+        plano['hash_' + nome] = win_move._digest(texto)
+    assert win_move._validar_journal(plano) == plano
+    for mudanca in (
+        {'conteudo_origem': 'alterado'},
+        {'id_destino': plano['id_origem']},
+        {'pais_origem': []},
+        {'origem': 'relativo'},
+    ):
+        with pytest.raises(ValueError):
+            win_move._validar_journal({**plano, **mudanca})
+
+
 @pytest.mark.skipif(os.name != 'nt', reason='requer DPAPI do Windows')
 def test_journal_dpapi_protege_e_autentica_conteudos(tmp_path):
     plano = {
