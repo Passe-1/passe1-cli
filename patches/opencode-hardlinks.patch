@@ -1,5 +1,49 @@
+diff --git a/packages/core/src/ripgrep/binary.ts b/packages/core/src/ripgrep/binary.ts
+index 762a8e61..f6f874f1 100644
+--- a/packages/core/src/ripgrep/binary.ts
++++ b/packages/core/src/ripgrep/binary.ts
+@@ -91,33 +91,14 @@ export namespace RipgrepBinary {
+       return Service.of({
+         filepath: yield* Effect.cached(
+           Effect.gen(function* () {
++            const bundled = process.env.PASSE1_BUNDLED_RG
++            if (bundled) {
++              if (!(yield* fs.isFile(bundled).pipe(Effect.orDie))) throw new Error("Ripgrep empacotado não está disponível.")
++              return bundled
++            }
+             const system = yield* Effect.sync(() => which(process.platform === "win32" ? "rg.exe" : "rg"))
+             if (system && (yield* fs.isFile(system).pipe(Effect.orDie))) return system
+-
+-            const target = path.join(Global.Path.bin, `rg${process.platform === "win32" ? ".exe" : ""}`)
+-            if (yield* fs.isFile(target).pipe(Effect.orDie)) return target
+-
+-            const platformKey = `${process.arch}-${process.platform}` as keyof typeof PLATFORM
+-            const config = PLATFORM[platformKey]
+-            if (!config) throw new Error(`unsupported platform for ripgrep: ${platformKey}`)
+-
+-            const filename = `ripgrep-${VERSION}-${config.platform}.${config.extension}`
+-            const url = `https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${filename}`
+-            const archive = path.join(Global.Path.bin, filename)
+-
+-            yield* Effect.logInfo("downloading ripgrep", { url })
+-            yield* fs.ensureDir(Global.Path.bin).pipe(Effect.orDie)
+-            const bytes = yield* HttpClientRequest.get(url).pipe(
+-              http.execute,
+-              Effect.flatMap((response) => response.arrayBuffer),
+-              Effect.mapError((cause) => (cause instanceof Error ? cause : new Error(String(cause)))),
+-            )
+-            if (bytes.byteLength === 0) throw new Error(`failed to download ripgrep from ${url}`)
+-
+-            yield* fs.writeWithDirs(archive, new Uint8Array(bytes))
+-            yield* extract(archive, config, target)
+-            yield* fs.remove(archive, { force: true }).pipe(Effect.ignore)
+-            return target
++            throw new Error("Ripgrep não está disponível; reinstale o pacote Passe1.")
+           }),
+         ),
+       })
 diff --git a/packages/opencode/src/session/instruction.ts b/packages/opencode/src/session/instruction.ts
-index 7f593550..66f7d7b1 100644
+index 7f593550..ca5bcf1f 100644
 --- a/packages/opencode/src/session/instruction.ts
 +++ b/packages/opencode/src/session/instruction.ts
 @@ -11,6 +11,7 @@ import { Flag } from "@opencode-ai/core/flag/flag"
@@ -16,7 +60,7 @@ index 7f593550..66f7d7b1 100644
      const read = Effect.fnUntraced(function* (filepath: string) {
 -      return yield* fs.readFileString(filepath).pipe(Effect.catch(() => Effect.succeed("")))
 +      return yield* verificar(fs, filepath).pipe(
-+        Effect.andThen(Effect.tryPromise({ try: () => lerSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })),
++        Effect.andThen(Effect.tryPromise({ try: () => lerSeguro(filepath, 1024 * 1024), catch: (error) => error instanceof Error ? error : new Error(String(error)) })),
 +        Effect.map((bytes) => new TextDecoder().decode(bytes)),
 +        Effect.catch(() => Effect.succeed("")),
 +      )
@@ -24,18 +68,27 @@ index 7f593550..66f7d7b1 100644
  
      const fetch = Effect.fnUntraced(function* (url: string) {
 diff --git a/packages/opencode/src/tool/apply_patch.ts b/packages/opencode/src/tool/apply_patch.ts
-index 3f89a639..9ce5e5db 100644
+index 3f89a639..d55de042 100644
 --- a/packages/opencode/src/tool/apply_patch.ts
 +++ b/packages/opencode/src/tool/apply_patch.ts
 @@ -7,6 +7,7 @@ import { InstanceState } from "@/effect/instance-state"
  import { Patch } from "../patch"
  import { createTwoFilesPatch, diffLines } from "diff"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { verificar } from "./hardlink"
++import { formatarSeguro, gravarSeguro, lerSeguro, removerSeguro, verificar } from "./hardlink"
  import { trimDiff } from "./edit"
  import { LSP } from "@/lsp/lsp"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -72,6 +73,7 @@ export const ApplyPatchTool = Tool.define(
+@@ -58,6 +59,8 @@ export const ApplyPatchTool = Tool.define(
+       const fileChanges: Array<{
+         filePath: string
+         oldContent: string
++        oldBom?: boolean
++        targetPrevious?: string | null
+         newContent: string
+         type: "add" | "update" | "delete" | "move"
+         movePath?: string
+@@ -72,6 +75,7 @@ export const ApplyPatchTool = Tool.define(
        for (const hunk of hunks) {
          const filePath = path.resolve(instance.directory, hunk.path)
          yield* assertExternalDirectoryEffect(ctx, filePath)
@@ -43,24 +96,127 @@ index 3f89a639..9ce5e5db 100644
  
          switch (hunk.type) {
            case "add": {
-@@ -218,6 +220,8 @@ export const ApplyPatchTool = Tool.define(
+@@ -88,9 +92,11 @@ export const ApplyPatchTool = Tool.define(
+               if (change.removed) deletions += change.count || 0
+             }
+ 
++            const targetPrevious = (yield* afs.existsSafe(filePath)) ? new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(filePath))) : null
+             fileChanges.push({
+               filePath,
+               oldContent,
++              targetPrevious,
+               newContent: next.text,
+               type: "add",
+               diff,
+@@ -112,7 +118,7 @@ export const ApplyPatchTool = Tool.define(
+               )
+             }
+ 
+-            const source = yield* Bom.readFile(afs, filePath)
++            const source = Bom.split(new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(filePath))))
+             const oldContent = source.text
+             let newContent = oldContent
+             let bom = source.bom
+@@ -141,10 +147,13 @@ export const ApplyPatchTool = Tool.define(
+ 
+             const movePath = hunk.move_path ? path.resolve(instance.directory, hunk.move_path) : undefined
+             yield* assertExternalDirectoryEffect(ctx, movePath)
++            const targetPrevious = movePath && (yield* afs.existsSafe(movePath)) ? new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(movePath))) : null
+ 
+             fileChanges.push({
+               filePath,
+               oldContent,
++              oldBom: source.bom,
++              targetPrevious,
+               newContent,
+               type: hunk.move_path ? "move" : "update",
+               movePath,
+@@ -159,15 +168,7 @@ export const ApplyPatchTool = Tool.define(
+           }
+ 
+           case "delete": {
+-            const source = yield* Bom.readFile(afs, filePath).pipe(
+-              Effect.catch((error) =>
+-                Effect.fail(
+-                  new Error(
+-                    `apply_patch verification failed: ${error instanceof Error ? error.message : String(error)}`,
+-                  ),
+-                ),
+-              ),
+-            )
++            const source = Bom.split(new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(filePath))))
+             const contentToDelete = source.text
+             const deleteDiff = trimDiff(createTwoFilesPatch(filePath, filePath, contentToDelete, ""))
+ 
+@@ -176,6 +177,7 @@ export const ApplyPatchTool = Tool.define(
+             fileChanges.push({
+               filePath,
+               oldContent: contentToDelete,
++              oldBom: source.bom,
+               newContent: "",
+               type: "delete",
+               diff: deleteDiff,
+@@ -218,41 +220,35 @@ export const ApplyPatchTool = Tool.define(
        const updates: Array<{ file: string; event: "add" | "change" | "unlink" }> = []
  
        for (const change of fileChanges) {
 +        yield* verificar(afs, change.filePath)
 +        if (change.movePath) yield* verificar(afs, change.movePath)
          const edited = change.type === "delete" ? undefined : (change.movePath ?? change.filePath)
++        const original = Bom.join(change.oldContent, change.oldBom ?? false)
++        const formatted = edited ? yield* formatarSeguro(format, edited, Bom.join(change.newContent, change.bom)) : ""
++        const content = Bom.join(Bom.split(formatted).text, change.bom)
          switch (change.type) {
            case "add":
+-            // Create parent directories (recursive: true is safe on existing/root dirs)
+-
+-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
++            yield* Effect.promise(() => gravarSeguro(change.filePath, change.targetPrevious ?? null, content))
+             updates.push({ file: change.filePath, event: "add" })
+             break
+-
+           case "update":
+-            yield* afs.writeWithDirs(change.filePath, Bom.join(change.newContent, change.bom))
++            yield* Effect.promise(() => gravarSeguro(change.filePath, original, content))
+             updates.push({ file: change.filePath, event: "change" })
+             break
+-
+           case "move":
+             if (change.movePath) {
+-              // Create parent directories (recursive: true is safe on existing/root dirs)
+-
+-              yield* afs.writeWithDirs(change.movePath!, Bom.join(change.newContent, change.bom))
+-              yield* afs.remove(change.filePath)
++              yield* Effect.promise(() => gravarSeguro(change.movePath!, change.targetPrevious ?? null, content))
++              yield* Effect.promise(() => removerSeguro(change.filePath, original))
+               updates.push({ file: change.filePath, event: "unlink" })
+               updates.push({ file: change.movePath, event: "add" })
+             }
+             break
+-
+           case "delete":
+-            yield* afs.remove(change.filePath)
++            yield* Effect.promise(() => removerSeguro(change.filePath, original))
+             updates.push({ file: change.filePath, event: "unlink" })
+             break
+         }
+-
+         if (edited) {
+-          if (yield* format.file(edited)) {
+-            yield* Bom.syncFile(afs, edited, change.bom)
+-          }
+           yield* events.publish(FileSystem.Event.Edited, { file: edited })
+         }
+       }
 diff --git a/packages/opencode/src/tool/edit.ts b/packages/opencode/src/tool/edit.ts
-index a92e4720..ebe3a05a 100644
+index a92e4720..eb85869c 100644
 --- a/packages/opencode/src/tool/edit.ts
 +++ b/packages/opencode/src/tool/edit.ts
 @@ -16,6 +16,7 @@ import { Format } from "../format"
  import { InstanceState } from "@/effect/instance-state"
  import { Snapshot } from "@/snapshot"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { verificar } from "./hardlink"
++import { formatarSeguro, gravarSeguro, lerSeguro, verificar } from "./hardlink"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import * as Bom from "@/util/bom"
  
@@ -72,63 +228,120 @@ index a92e4720..ebe3a05a 100644
  
            let diff = ""
            let contentOld = ""
-@@ -108,6 +110,7 @@ export const EditTool = Tool.define(
+@@ -108,10 +110,10 @@ export const EditTool = Tool.define(
                      diff,
                    },
                  })
+-                yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-                if (yield* format.file(filePath)) {
+-                  contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-                }
 +                yield* verificar(afs, filePath)
-                 yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-                 if (yield* format.file(filePath)) {
-                   contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
-@@ -152,6 +155,7 @@ export const EditTool = Tool.define(
++                const formatted = yield* formatarSeguro(format, filePath, Bom.join(contentNew, desiredBom))
++                contentNew = Bom.split(formatted).text
++                yield* Effect.promise(() => gravarSeguro(filePath, null, Bom.join(contentNew, desiredBom)))
+                 yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+                 yield* events.publish(Watcher.Event.Updated, {
+                   file: filePath,
+@@ -123,7 +125,7 @@ export const EditTool = Tool.define(
+               const info = yield* afs.stat(filePath).pipe(Effect.catch(() => Effect.succeed(undefined)))
+               if (!info) throw new Error(`File ${filePath} not found`)
+               if (info.type === "Directory") throw new Error(`Path is a directory, not a file: ${filePath}`)
+-              const source = yield* Bom.readFile(afs, filePath)
++              const source = Bom.split(new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(filePath))))
+               contentOld = source.text
+ 
+               const ending = detectLineEnding(contentOld)
+@@ -152,10 +154,10 @@ export const EditTool = Tool.define(
                  },
                })
  
+-              yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
+-              if (yield* format.file(filePath)) {
+-                contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
+-              }
 +              yield* verificar(afs, filePath)
-               yield* afs.writeWithDirs(filePath, Bom.join(contentNew, desiredBom))
-               if (yield* format.file(filePath)) {
-                 contentNew = yield* Bom.syncFile(afs, filePath, desiredBom)
++              const formatted = yield* formatarSeguro(format, filePath, Bom.join(contentNew, desiredBom))
++              contentNew = Bom.split(formatted).text
++              yield* Effect.promise(() => gravarSeguro(filePath, Bom.join(contentOld, source.bom), Bom.join(contentNew, desiredBom)))
+               yield* events.publish(FileSystem.Event.Edited, { file: filePath })
+               yield* events.publish(Watcher.Event.Updated, {
+                 file: filePath,
 diff --git a/packages/opencode/src/tool/grep.ts b/packages/opencode/src/tool/grep.ts
-index 6ea67124..ad0cf394 100644
+index 6ea67124..37e70ced 100644
 --- a/packages/opencode/src/tool/grep.ts
 +++ b/packages/opencode/src/tool/grep.ts
-@@ -4,6 +4,7 @@ import { InstanceState } from "@/effect/instance-state"
+@@ -3,7 +3,9 @@ import { Effect, Schema } from "effect"
+ import { InstanceState } from "@/effect/instance-state"
  import { FSUtil } from "@opencode-ai/core/fs-util"
  import { Ripgrep } from "@opencode-ai/core/ripgrep"
++import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { sensitive, verificar } from "./hardlink"
++import { buscarSeguro } from "./hardlink"
  import DESCRIPTION from "./grep.txt"
  import * as Tool from "./tool"
  
-@@ -79,10 +80,16 @@ export const GrepTool = Tool.define(
+@@ -22,6 +24,7 @@ export const GrepTool = Tool.define(
+   Effect.gen(function* () {
+     const fs = yield* FSUtil.Service
+     const ripgrep = yield* Ripgrep.Service
++    const binary = yield* RipgrepBinary.Service
+     return {
+       description: DESCRIPTION,
+       parameters: Parameters,
+@@ -60,30 +63,20 @@ export const GrepTool = Tool.define(
+           const search = FSUtil.resolve(requested)
+           const info = yield* fs.stat(search).pipe(Effect.catch(() => Effect.succeed(undefined)))
+           const cwd = info?.type === "Directory" ? search : path.dirname(search)
+-          const result = yield* ripgrep.grep({
+-            cwd,
+-            pattern: params.pattern,
+-            include: params.include,
+-            limit: 100,
+-          })
+-          if (result.length === 0) return empty
+-
+-          const rows = result.map((item) => ({
+-            path: path.resolve(
+-              requestedInfo?.type === "Directory" ? requested : path.dirname(requested),
+-              item.entry.path,
+-            ),
+-            line: item.line,
+-            text: item.text,
+-          }))
++          const entries = yield* ripgrep.find({ cwd, pattern: params.include ?? "*", hidden: true, follow: false, limit: 10000 })
++          const rows = entries.map((item) => ({ path: path.resolve(requestedInfo?.type === "Directory" ? requested : path.dirname(requested), item.path) })).filter((item) =>
++            requestedInfo?.type === "Directory" || item.path === path.resolve(requested),
++          )
++          if (rows.length === 0) return empty
  
            const limit = 100
-           const truncated = rows.length === limit
+-          const truncated = rows.length === limit
 -          const final = rows
-+          const checked = yield* Effect.forEach(rows, (match) =>
-+            sensitive(match.path) ? Effect.succeed(undefined) : verificar(fs, match.path).pipe(
-+              Effect.as(match),
-+              Effect.catch(() => Effect.succeed(undefined)),
-+            ),
-+          )
-+          const final = checked.filter((match) => match !== undefined)
++          const rgPath = yield* binary.filepath
++          const final = yield* Effect.promise(() => buscarSeguro(params.pattern, rows.map((item) => item.path), rgPath))
            if (final.length === 0) return empty
++          const truncated = final.length === limit || entries.length === 10000
  
 -          const total = rows.length
+-          const hasMore = truncated || result.length === limit
 +          const total = final.length
-           const hasMore = truncated || result.length === limit
++          const hasMore = truncated || entries.length === 10000
            const output = [`Found ${total} matches${hasMore ? " (more matches available)" : ""}`]
  
+           let current = ""
 diff --git a/packages/opencode/src/tool/hardlink.ts b/packages/opencode/src/tool/hardlink.ts
 new file mode 100644
-index 00000000..04e2110d
+index 00000000..3d48357a
 --- /dev/null
 +++ b/packages/opencode/src/tool/hardlink.ts
-@@ -0,0 +1,66 @@
+@@ -0,0 +1,134 @@
 +import { Effect, Option } from "effect"
 +import { FSUtil } from "@opencode-ai/core/fs-util"
 +import fs from "fs/promises"
 +import path from "path"
++import os from "os"
++import type { Interface as FormatInterface } from "../format"
 +
 +// Refuse links whose target can escape the project or share an inode.
 +export const verificar = Effect.fn("Passe1.verificarLinks")(function* (filesystem: FSUtil.Interface, file: string) {
@@ -171,35 +384,101 @@ index 00000000..04e2110d
 +    [".env", ".pem", ".key", ".p12", ".pfx", ".keystore"].some((suffix) => name.endsWith(suffix))
 +}
 +
-+// Read through one descriptor; never reopen a checked path for its contents.
-+export async function lerSeguro(file: string): Promise<Uint8Array> {
-+  const before = await fs.lstat(file)
-+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1) throw new Error("Arquivo inválido ou possui múltiplos links.")
-+  const constants = (await import("node:fs")).constants
-+  const handle = await fs.open(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
-+  try {
-+    const opened = await handle.stat()
-+    if (!opened.isFile() || opened.nlink !== 1 || opened.dev !== before.dev || opened.ino !== before.ino)
-+      throw new Error("Arquivo mudou durante a abertura.")
-+    if (opened.size > 64 * 1024 * 1024) throw new Error("Arquivo excede o limite de leitura de 64 MiB.")
-+    const bytes = await handle.readFile()
-+    const after = await handle.stat()
-+    if (after.nlink !== 1 || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
-+      throw new Error("Arquivo mudou durante a leitura.")
-+    return bytes
-+  } finally {
-+    await handle.close()
++// The helper anchors the path and streams from a single verified handle.
++export async function abrirSeguro(file: string) {
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  if (!python || !root) throw new Error("Leitura segura indisponível: helper não configurado.")
++  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); sys.argv=[sys.argv[0],sys.argv[2]]; from passe1_engine.secure_stream import _main; sys.exit(_main())"
++  const child = Bun.spawn([python, "-I", "-c", bootstrap, root, file], { stdout: "pipe", stderr: "pipe" })
++  const reader = child.stdout.getReader()
++  const first = await reader.read()
++  async function* chunks() {
++    try {
++      if (!first.done) yield first.value
++      while (true) {
++        const item = await reader.read()
++        if (item.done) break
++        yield item.value
++      }
++      if (await child.exited !== 0) throw new Error("Leitura segura recusada ou arquivo modificado.")
++    } finally {
++      reader.releaseLock()
++      if (child.exitCode === null) child.kill()
++    }
 +  }
++  return { sample: first.value ?? new Uint8Array(), chunks: chunks(), cancel: () => { reader.cancel(); child.kill() } }
++}
++export async function lerSeguro(file: string, limit = Number.POSITIVE_INFINITY): Promise<Uint8Array> {
++  const opened = await abrirSeguro(file)
++  const parts: Uint8Array[] = []
++  let size = 0
++  for await (const part of opened.chunks) {
++    size += part.length
++    if (size > limit) throw new Error("Arquivo excede o limite de leitura.")
++    parts.push(part)
++  }
++  return Buffer.concat(parts)
++}
++
++export async function gravarSeguro(file: string, previous: string | null, next: string) {
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  if (!python || !root) throw new Error("Escrita segura indisponível: helper não configurado.")
++  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
++  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "ignore", stderr: "pipe" })
++  child.stdin.write(JSON.stringify({ caminho: file, anterior: previous, novo: next }))
++  child.stdin.end()
++  if (await child.exited !== 0) throw new Error("Escrita segura recusada ou arquivo mudou durante aprovação.")
++}
++
++export const formatarSeguro = (format: FormatInterface, file: string, content: string) =>
++  Effect.acquireUseRelease(
++    Effect.tryPromise({ try: async () => fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), "passe1-format-")), catch: (error) => error instanceof Error ? error : new Error(String(error)) }),
++    (dir) => Effect.gen(function* () {
++      const temporary = path.join(dir, "arquivo" + path.extname(file))
++      yield* Effect.tryPromise({ try: () => fs.writeFile(temporary, content, { mode: 0o600, flag: "wx" }), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
++      if (!(yield* format.file(temporary))) return content
++      const bytes = yield* Effect.tryPromise({ try: () => lerSeguro(temporary), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
++      return new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes)
++    }),
++    (dir) => Effect.promise(() => fs.rm(dir, { recursive: true, force: true })),
++  )
++
++export async function removerSeguro(file: string, previous: string) {
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  if (!python || !root) throw new Error("Remoção segura indisponível: helper não configurado.")
++  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_write import _main; sys.exit(_main())"
++  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "ignore", stderr: "pipe" })
++  child.stdin.write(JSON.stringify({ caminho: file, anterior: previous, operacao: "remover" }))
++  child.stdin.end()
++  if (await child.exited !== 0) throw new Error("Remoção segura recusada ou arquivo mudou durante aprovação.")
++}
++
++export async function buscarSeguro(pattern: string, paths: string[], ripgrep: string) {
++  const python = process.env.PASSE1_SECURE_PYTHON
++  const root = process.env.PASSE1_SECURE_ROOT
++  if (!python || !root) throw new Error("Busca segura indisponível: helper não configurado.")
++  const bootstrap = "import sys; sys.path.insert(0,sys.argv[1]); from passe1_engine.secure_search import _main; sys.exit(_main())"
++  const child = Bun.spawn([python, "-I", "-c", bootstrap, root], { stdin: "pipe", stdout: "pipe", stderr: "pipe" })
++  const output = new Response(child.stdout).text()
++  child.stdin.write(JSON.stringify({ padrao: pattern, caminhos: paths, ripgrep }))
++  child.stdin.end()
++  const [json, status] = await Promise.all([output, child.exited])
++  if (status !== 0) throw new Error("Busca segura recusada.")
++  const items: [string, number, string][] = JSON.parse(json)
++  return items.map(([path, line, text]) => ({ path, line, text }))
 +}
 diff --git a/packages/opencode/src/tool/read.ts b/packages/opencode/src/tool/read.ts
-index 678ed445..80c84ccb 100644
+index 678ed445..115c44d3 100644
 --- a/packages/opencode/src/tool/read.ts
 +++ b/packages/opencode/src/tool/read.ts
 @@ -7,6 +7,7 @@ import { LSP } from "@/lsp/lsp"
  import DESCRIPTION from "./read.txt"
  import { InstanceState } from "@/effect/instance-state"
  import { assertExternalDirectoryEffect } from "./external-directory"
-+import { lerSeguro, sensitive, verificar } from "./hardlink"
++import { abrirSeguro, sensitive, verificar } from "./hardlink"
  import { Instruction } from "../session/instruction"
  import { isPdfAttachment, sniffAttachmentMime } from "@/util/media"
  
@@ -223,20 +502,54 @@ index 678ed445..80c84ccb 100644
 -    })
 -
 -    const lines = Effect.fn("ReadTool.lines")(function* (filepath: string, opts: { limit: number; offset: number }) {
-+    const lines = Effect.fn("ReadTool.lines")(function* (bytes: Uint8Array, opts: { limit: number; offset: number }) {
++    const lines = Effect.fn("ReadTool.lines")(function* (chunks: AsyncIterable<Uint8Array>, opts: { limit: number; offset: number }) {
        const start = opts.offset - 1
        const raw: string[] = []
        const flags = { bytes: 0, count: 0, cut: false, more: false, done: false }
-@@ -145,7 +131,7 @@ export const ReadTool = Tool.define<
+@@ -144,13 +130,26 @@ export const ReadTool = Tool.define<
+       // avoid Stream.runForEachWhile (it currently swallows the final unterminated
        // line of the upstream splitLines pipeline) and use a tagged error to stop the
        // upstream file stream as soon as the byte cap is reached.
-       const decoder = new TextDecoder("utf-8")
+-      const decoder = new TextDecoder("utf-8")
 -      yield* fs.stream(filepath).pipe(
-+      yield* Stream.fromIterable([bytes]).pipe(
-         Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
+-        Stream.map((bytes) => decoder.decode(bytes, { stream: true })),
++      async function* limitedLines() {
++        const decoder = new TextDecoder("utf-8")
++        let count = 0
++        for await (const bytes of chunks) {
++          const text = decoder.decode(bytes, { stream: true })
++          for (const [index, part] of text.split("\n").entries()) {
++            if (index > 0) { yield "\n"; count = 0 }
++            const remain = Math.max(0, MAX_LINE_LENGTH + 1 - count)
++            if (remain > 0) yield part.slice(0, remain)
++            count += part.length
++          }
++        }
++        const tail = decoder.decode()
++        if (tail) yield tail.slice(0, Math.max(0, MAX_LINE_LENGTH + 1 - count))
++      }
++      yield* Stream.fromAsyncIterable(limitedLines(), (error) => error instanceof Error ? error : new Error(String(error))).pipe(
          Stream.splitLines,
          Stream.runForEach((text) =>
-@@ -236,6 +222,8 @@ export const ReadTool = Tool.define<
+           Effect.gen(function* () {
+-            if (flags.done) return yield* new ReadStop()
++            if (flags.done) return
+             flags.count += 1
+             if (flags.count <= start) return
+ 
+@@ -170,10 +169,9 @@ export const ReadTool = Tool.define<
+             flags.cut = true
+             flags.more = true
+             flags.done = true
+-            return yield* new ReadStop()
++            return
+           }),
+         ),
+-        Effect.catchTag("ReadStop", () => Effect.void),
+       )
+ 
+       return { raw, count: flags.count, cut: flags.cut, more: flags.more, offset: opts.offset }
+@@ -236,6 +234,8 @@ export const ReadTool = Tool.define<
          filepath = path.resolve(instance.directory, filepath)
        }
        if (process.platform === "win32") {
@@ -245,7 +558,7 @@ index 678ed445..80c84ccb 100644
          filepath = FSUtil.normalizePath(filepath)
        }
        const title = path.relative(instance.worktree, filepath)
-@@ -260,6 +248,15 @@ export const ReadTool = Tool.define<
+@@ -260,6 +260,15 @@ export const ReadTool = Tool.define<
        })
  
        if (!stat) return yield* miss(filepath)
@@ -261,61 +574,93 @@ index 678ed445..80c84ccb 100644
  
        if (stat.type === "Directory") {
          const items = yield* list(filepath)
-@@ -297,14 +294,15 @@ export const ReadTool = Tool.define<
+@@ -297,14 +306,16 @@ export const ReadTool = Tool.define<
          }
        }
  
 +      yield* verificar(fs, filepath)
-+      const bytes = yield* Effect.tryPromise({ try: () => lerSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
++      const opened = yield* Effect.tryPromise({ try: () => abrirSeguro(filepath), catch: (error) => error instanceof Error ? error : new Error(String(error)) })
        const loaded = yield* instruction.resolve(ctx.messages, filepath, ctx.messageID)
 -      const sample = yield* readSample(filepath, Number(stat.size), SAMPLE_BYTES)
-+      const sample = bytes.subarray(0, SAMPLE_BYTES)
++      const sample = opened.sample.subarray(0, SAMPLE_BYTES)
  
        const mime = sniffAttachmentMime(sample, FSUtil.mimeType(filepath))
        const isImage = SUPPORTED_IMAGE_MIMES.has(mime)
  
        if (isImage || isPdfAttachment(mime)) {
 -        const bytes = yield* fs.readFile(filepath)
++        const bytes = yield* Effect.tryPromise({ try: async () => { const parts: Uint8Array[] = []; let size = 0; for await (const part of opened.chunks) { size += part.length; if (size > 16 * 1024 * 1024) throw new Error("Anexo excede o limite de 16 MiB."); parts.push(part) }; return Buffer.concat(parts) }, catch: (error) => error instanceof Error ? error : new Error(String(error)) })
          const msg = isPdfAttachment(mime) ? "PDF read successfully" : "Image read successfully"
          return {
            title,
-@@ -328,7 +326,7 @@ export const ReadTool = Tool.define<
+@@ -325,10 +336,11 @@ export const ReadTool = Tool.define<
+       }
+ 
+       if (isBinaryFile(filepath, sample)) {
++        opened.cancel()
          return yield* Effect.fail(new Error(`Cannot read binary file: ${filepath}`))
        }
  
 -      const file = yield* lines(filepath, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
-+      const file = yield* lines(bytes, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
++      const file = yield* lines(opened.chunks, { limit: params.limit ?? DEFAULT_READ_LIMIT, offset: params.offset || 1 })
        if (file.count < file.offset && !(file.count === 0 && file.offset === 1)) {
          return yield* Effect.fail(
            new Error(`Offset ${file.offset} is out of range for this file (${file.count} lines)`),
+diff --git a/packages/opencode/src/tool/registry.ts b/packages/opencode/src/tool/registry.ts
+index 9167cb3e..6ba14f18 100644
+--- a/packages/opencode/src/tool/registry.ts
++++ b/packages/opencode/src/tool/registry.ts
+@@ -1,3 +1,4 @@
++import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
+ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
+ import { httpClient } from "@opencode-ai/core/effect/app-node-platform"
+ import { Ripgrep } from "@opencode-ai/core/ripgrep"
+@@ -449,6 +450,7 @@ export const node = LayerNode.make({
+     MCP.node,
+     Database.node,
+     Ripgrep.node,
++    RipgrepBinary.node,
+   ],
+ })
+ 
 diff --git a/packages/opencode/src/tool/write.ts b/packages/opencode/src/tool/write.ts
-index 37be6d8c..697823a5 100644
+index 37be6d8c..9233b339 100644
 --- a/packages/opencode/src/tool/write.ts
 +++ b/packages/opencode/src/tool/write.ts
 @@ -5,6 +5,7 @@ import * as Tool from "./tool"
  import { LSP } from "@/lsp/lsp"
  import { createTwoFilesPatch } from "diff"
  import DESCRIPTION from "./write.txt"
-+import { verificar } from "./hardlink"
++import { formatarSeguro, gravarSeguro, lerSeguro, verificar } from "./hardlink"
  import { EventV2Bridge } from "@/event-v2-bridge"
  import { FileSystem } from "@opencode-ai/core/filesystem"
  import { Watcher } from "@opencode-ai/core/filesystem/watcher"
-@@ -43,6 +44,7 @@ export const WriteTool = Tool.define(
+@@ -43,8 +44,9 @@ export const WriteTool = Tool.define(
              : path.join(instance.directory, params.filePath)
            yield* assertExternalDirectoryEffect(ctx, filepath)
  
 +          yield* verificar(fs, filepath)
            const exists = yield* fs.existsSafe(filepath)
-           const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
+-          const source = exists ? yield* Bom.readFile(fs, filepath) : { bom: false, text: "" }
++          const source = exists ? Bom.split(new TextDecoder("utf-8", { ignoreBOM: true }).decode(yield* Effect.promise(() => lerSeguro(filepath)))) : { bom: false, text: "" }
            const next = Bom.split(params.content)
-@@ -61,6 +63,7 @@ export const WriteTool = Tool.define(
+           const desiredBom = source.bom || next.bom
+           const contentOld = source.text
+@@ -61,10 +63,10 @@ export const WriteTool = Tool.define(
              },
            })
  
+-          yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
+-          if (yield* format.file(filepath)) {
+-            yield* Bom.syncFile(fs, filepath, desiredBom)
+-          }
 +          yield* verificar(fs, filepath)
-           yield* fs.writeWithDirs(filepath, Bom.join(contentNew, desiredBom))
-           if (yield* format.file(filepath)) {
-             yield* Bom.syncFile(fs, filepath, desiredBom)
++          const formatted = yield* formatarSeguro(format, filepath, Bom.join(contentNew, desiredBom))
++          const safeContent = Bom.join(Bom.split(formatted).text, desiredBom)
++          yield* Effect.promise(() => gravarSeguro(filepath, exists ? Bom.join(contentOld, source.bom) : null, safeContent))
+           yield* events.publish(FileSystem.Event.Edited, { file: filepath })
+           yield* events.publish(Watcher.Event.Updated, {
+             file: filepath,
 diff --git a/packages/opencode/test/tool/apply_patch.test.ts b/packages/opencode/test/tool/apply_patch.test.ts
 index 74203615..cfa6da8e 100644
 --- a/packages/opencode/test/tool/apply_patch.test.ts
@@ -362,10 +707,24 @@ index 46155a50..30e1c05d 100644
      it.instance("creates new file when oldString is empty", () =>
        Effect.gen(function* () {
 diff --git a/packages/opencode/test/tool/grep.test.ts b/packages/opencode/test/tool/grep.test.ts
-index 13858f9f..29c477e1 100644
+index 13858f9f..d23d442d 100644
 --- a/packages/opencode/test/tool/grep.test.ts
 +++ b/packages/opencode/test/tool/grep.test.ts
-@@ -77,6 +77,19 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
+@@ -1,3 +1,4 @@
++import { RipgrepBinary } from "@opencode-ai/core/ripgrep/binary"
+ import { PermissionV1 } from "@opencode-ai/core/v1/permission"
+ import { describe, expect } from "bun:test"
+ import fs from "fs/promises"
+@@ -24,7 +25,7 @@ import { Filesystem } from "@/util/filesystem"
+ 
+ const toolLayer = (flags: Partial<RuntimeFlags.Info> = {}) =>
+   LayerNode.compile(
+-    LayerNode.group([CrossSpawnSpawner.node, FSUtil.node, Ripgrep.node, Truncate.node, Agent.node, Git.node]),
++    LayerNode.group([CrossSpawnSpawner.node, FSUtil.node, Ripgrep.node, RipgrepBinary.node, Truncate.node, Agent.node, Git.node]),
+   )
+ 
+ const it = testEffect(toolLayer())
+@@ -77,6 +78,19 @@ const git = Effect.fn("GrepToolTest.git")(function* (cwd: string, args: string[]
  })
  
  describe("tool.grep", () => {
@@ -385,7 +744,7 @@ index 13858f9f..29c477e1 100644
    rooted.live("basic search", () =>
      Effect.gen(function* () {
        const info = yield* GrepTool
-@@ -170,7 +183,7 @@ describe("tool.grep", () => {
+@@ -170,7 +184,7 @@ describe("tool.grep", () => {
      }),
    )
  
@@ -394,7 +753,7 @@ index 13858f9f..29c477e1 100644
      Effect.gen(function* () {
        if (process.platform === "win32") return
  
-@@ -214,10 +227,9 @@ describe("tool.grep", () => {
+@@ -214,10 +228,9 @@ describe("tool.grep", () => {
          next,
        )
  
@@ -408,7 +767,7 @@ index 13858f9f..29c477e1 100644
    )
  })
 diff --git a/packages/opencode/test/tool/read.test.ts b/packages/opencode/test/tool/read.test.ts
-index c1ef61b2..0db9e157 100644
+index c1ef61b2..549bd3ba 100644
 --- a/packages/opencode/test/tool/read.test.ts
 +++ b/packages/opencode/test/tool/read.test.ts
 @@ -3,6 +3,7 @@ import { afterEach, describe, expect } from "bun:test"
@@ -419,7 +778,7 @@ index c1ef61b2..0db9e157 100644
  import { Agent } from "../../src/agent/agent"
  import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
  import { FSUtil } from "@opencode-ai/core/fs-util"
-@@ -312,6 +313,57 @@ describe("tool.read env file permissions", () => {
+@@ -312,7 +313,91 @@ describe("tool.read env file permissions", () => {
    }
  })
  
@@ -475,9 +834,43 @@ index c1ef61b2..0db9e157 100644
 +})
 +
  describe("tool.read truncation", () => {
++  it.instance("limita linha única acima de 64 MiB", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, "linha-grande.txt")
++    yield* Effect.promise(() => Bun.write(arquivo, Buffer.alloc(65 * 1024 * 1024, 97)))
++    const result = yield* exec(test.directory, { filePath: arquivo, limit: 1 })
++    expect(result.output).toContain("line truncated")
++    expect(result.output.length).toBeLessThan(5000)
++  }))
++
++  it.instance("recusa anexos maiores que 16 MiB", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, "grande.png")
++    const dados = Buffer.alloc(17 * 1024 * 1024)
++    Buffer.from([137,80,78,71,13,10,26,10]).copy(dados)
++    yield* Effect.promise(() => Bun.write(arquivo, dados))
++    const erro = yield* fail(test.directory, { filePath: arquivo })
++    expect(erro.message).toContain("16 MiB")
++  }))
++
++  it.instance("lê trecho de arquivo acima de 64 MiB", () => Effect.gen(function* () {
++    const test = yield* TestInstance
++    const arquivo = path.join(test.directory, "grande.txt")
++    yield* Effect.promise(async () => {
++      const handle = await fs.open(arquivo, "w")
++      try {
++        const bloco = Buffer.from(("linha " + "a".repeat(65528) + "\n").repeat(16))
++        for (let i = 0; i < 66; i++) await handle.write(bloco)
++      } finally { await handle.close() }
++    })
++    const result = yield* exec(test.directory, { filePath: arquivo, limit: 1 })
++    expect(result.output).toContain("linha ")
++  }))
++
    it.instance("truncates large file by bytes and sets truncated metadata", () =>
      Effect.gen(function* () {
-@@ -568,6 +620,15 @@ root_type Monster;`
+       const test = yield* TestInstance
+@@ -568,6 +653,15 @@ root_type Monster;`
  })
  
  describe("tool.read loaded instructions", () => {
@@ -494,7 +887,7 @@ index c1ef61b2..0db9e157 100644
      Effect.gen(function* () {
        const dir = yield* tmpdirScoped()
 diff --git a/packages/opencode/test/tool/write.test.ts b/packages/opencode/test/tool/write.test.ts
-index 4f897dc8..0e2c55cb 100644
+index 4f897dc8..560f1bff 100644
 --- a/packages/opencode/test/tool/write.test.ts
 +++ b/packages/opencode/test/tool/write.test.ts
 @@ -1,6 +1,6 @@
@@ -535,3 +928,17 @@ index 4f897dc8..0e2c55cb 100644
    describe("new file creation", () => {
      it.instance("writes content to new file", () =>
        Effect.gen(function* () {
+@@ -159,6 +182,13 @@ describe("tool.write", () => {
+       },
+     )
+ 
++    it.instance("aplica a transformação do formatador ao conteúdo publicado", () => Effect.gen(function* () {
++      const test = yield* TestInstance
++      const arquivo = path.join(test.directory, "formatted.xyz")
++      yield* run({ filePath: arquivo, content: "antes" })
++      expect(yield* Effect.promise(() => fs.readFile(arquivo, "utf-8"))).toBe("depois")
++    }), { config: { formatter: { teste: { extensions: [".xyz"], command: ["node", "-e", "require('fs').writeFileSync(process.argv[1], 'depois')", "$FILE"] } } } })
++
+     it.instance("returns diff in metadata for existing files", () =>
+       Effect.gen(function* () {
+         const test = yield* TestInstance

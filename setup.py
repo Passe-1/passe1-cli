@@ -19,5 +19,7 @@ class WheelNativo(bdist_wheel):
 
 if "bdist_wheel" in sys.argv and not Path("passe1_engine/bin", "opencode.exe" if os.name == "nt" else "opencode").is_file():
     raise RuntimeError("Compile o motor OpenCode antes de construir o wheel.")
+if "bdist_wheel" in sys.argv and not Path("passe1_engine/bin", "rg.exe" if os.name == "nt" else "rg").is_file():
+    raise RuntimeError("Instale o ripgrep verificado antes de construir o wheel.")
 
 setup(cmdclass={"bdist_wheel": WheelNativo})
