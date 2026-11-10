@@ -1,9 +1,11 @@
 """Interface Passe1 usando motor OpenCode incorporado ao pacote."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -88,7 +90,7 @@ def _instrucoes():
     return []
 
 
-def iniciar(argv=None):
+def iniciar(argv=None, *, agente=None):
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] in {"login", "status", "logout", "keys", "config", "models"}:
         return passe1.main(args)
@@ -96,24 +98,62 @@ def iniciar(argv=None):
     if not binario.is_file():
         print("Motor OpenCode não está instalado neste pacote. Instale o wheel da sua plataforma.")
         return 1
-    chave = passe1._ler_chave()
+    base = passe1._base_url(agente.base_url if agente else None)
+    chave = passe1._ler_chave(base)
     if not chave:
         print("Entre na conta Passe1 para continuar.")
-        if passe1.main(["login"]) != 0:
+        login = ["--base-url", base, "login"] if agente and agente.base_url else ["login"]
+        if passe1.main(login) != 0:
             return 1
-        chave = passe1._ler_chave()
+        chave = passe1._ler_chave(base)
     if not chave:
         print("Selecione uma chave no login antes de continuar.")
         return 1
-    modelo = passe1._modelo_padrao()
-    base = passe1._base_url()
+    modelo = (agente.model if agente else None) or passe1._modelo_padrao()
     modelos = _catalogo(base, chave, modelo)
-    config = {"provider": {"passe1": {"npm": "@ai-sdk/openai-compatible", "name": "Passe1", "options": {"baseURL": base}, "models": modelos}}, "model": "passe1/" + modelo, "enabled_providers": ["passe1"], "permission": {"edit": "ask", "bash": "ask", "external_directory": "ask"}, "instructions": _instrucoes()}
+    config = {"provider": {"passe1": {"npm": "@ai-sdk/openai-compatible", "name": "Passe1", "options": {"baseURL": base}, "models": modelos}}, "model": "passe1/" + modelo, "enabled_providers": ["passe1"], "permission": {"edit": "ask", "bash": "ask", "external_directory": "ask", "webfetch": "ask", "websearch": "ask", "read": {"*": "allow", "*.env*": "ask", "*.pem": "ask", "*.key": "ask", "*.p12": "ask", "*.pfx": "ask", "*.keystore": "ask", "*.ssh/*": "ask", "*.aws/*": "ask", "*.gnupg/*": "ask", "*.config/*": "ask", "*.npmrc": "ask", "*.pypirc": "ask", "*.netrc": "ask", "*.dockerconfigjson": "ask", "*credentials*": "ask", "*secrets*": "ask", "*secret.*": "ask", "*token*": "ask", "*private_key*": "ask", "*id_rsa*": "ask", "*id_ed25519*": "ask", "*id_ecdsa*": "ask", "*service-account*": "ask"}}, "instructions": _instrucoes()}
     _guardar_credencial(chave)
     raiz = _raiz()
     ambiente = {nome: valor for nome, valor in os.environ.items() if not nome.startswith("OPENCODE_") and nome != "PASSE1_API_KEY"}
     ambiente.update({"OPENCODE_CONFIG_CONTENT": json.dumps(config), "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_DISABLE_DEFAULT_PLUGINS": "1", "OPENCODE_DISABLE_EXTERNAL_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_SKILLS": "1", "OPENCODE_DISABLE_CLAUDE_CODE_PROMPT": "1", "OPENCODE_DISABLE_AUTOUPDATE": "1", "OPENCODE_DISABLE_MODELS_FETCH": "1", "XDG_CONFIG_HOME": str(raiz / "config"), "XDG_DATA_HOME": str(raiz / "data"), "XDG_STATE_HOME": str(raiz / "state"), "XDG_CACHE_HOME": str(raiz / "cache")})
-    os.execvpe(str(binario), [str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
+    if agente is not None:
+        if agente.sandbox:
+            print("O sandbox do agente legado está disponível apenas no macOS.")
+            return 1
+        passe1._imagens(agente.image or [])
+        comando = [str(binario), "run", "--pure", "-m", "passe1/" + modelo]
+        if agente.session:
+            if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agente.session):
+                print("Nome de sessão inválido.")
+                return 1
+            identificador = hashlib.sha256((str(Path.cwd().resolve()) + "\0" + base + "\0" + modelo + "\0" + chave).encode()).hexdigest()[:16]
+            titulo = "Passe1:" + agente.session + ":" + identificador
+            try:
+                listado = subprocess.run([str(binario), "session", "list", "--format", "json", "--pure"], env=ambiente, capture_output=True, text=True, timeout=30, check=True)
+                sessoes = json.loads(listado.stdout)
+                if not isinstance(sessoes, list):
+                    raise TypeError("lista inválida")
+                diretorio = os.path.normcase(os.path.normpath(str(Path.cwd().resolve())))
+                encontradas = [item for item in sessoes if isinstance(item, dict) and item.get("title") == titulo and isinstance(item.get("directory"), str) and os.path.normcase(os.path.normpath(item["directory"])) == diretorio]
+                if len(encontradas) > 1:
+                    raise ValueError("sessão ambígua")
+                if encontradas:
+                    id_sessao = encontradas[0].get("id")
+                    if not isinstance(id_sessao, str) or not re.fullmatch(r"ses_[A-Za-z0-9_-]+", id_sessao):
+                        raise ValueError("identificador inválido")
+                    comando += ["--session", id_sessao]
+                else:
+                    comando += ["--title", titulo]
+            except (OSError, ValueError, TypeError, KeyError, subprocess.SubprocessError):
+                print("Não foi possível localizar a sessão com segurança.")
+                return 1
+        for imagem in agente.image or []:
+            comando += ["--file", imagem]
+        if not agente.tarefa:
+            comando.append("--interactive")
+        comando.extend(agente.tarefa)
+        return os.execvpe(str(binario), comando, ambiente)
+    return os.execvpe(str(binario), [str(binario), "--pure", "-m", "passe1/" + modelo, *args], ambiente)
 
 
 if __name__ == "__main__":

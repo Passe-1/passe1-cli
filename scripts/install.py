@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-API = "https://api.github.com/repos/Passe-1/passe1-cli/releases/latest"
+API = "https://api.github.com/repos/Passe-1/passe1-cli/releases?per_page=20"
 PREFIXO = "/Passe-1/passe1-cli/releases/download/"
 
 
@@ -38,13 +39,32 @@ def selecionar(release, tags):
     return min(candidatos)[1]
 
 
+def escolher_release(releases, tags):
+    tags = list(tags)
+    for release in releases:
+        if release.get("draft") or release.get("prerelease"):
+            continue
+        try:
+            return release.get("tag_name"), selecionar(release, tags)
+        except (RuntimeError, ValueError):
+            continue
+    raise RuntimeError("Nenhuma release publicada contém wheel compatível com este sistema.")
+
+
 def main():
     try:
-        from pip._vendor.packaging.tags import sys_tags
-        req = Request(API, headers={"User-Agent": "passe1-installer", "Accept": "application/vnd.github+json"})
-        with urlopen(req, timeout=30) as resposta:
-            release = json.load(resposta)
-        url = selecionar(release, sys_tags())
+        url = os.environ.get("PASSE1_SPEC")
+        if url:
+            print("Instalando a especificação fornecida em PASSE1_SPEC.")
+        else:
+            from pip._vendor.packaging.tags import sys_tags
+            req = Request(API, headers={"User-Agent": "passe1-installer", "Accept": "application/vnd.github+json"})
+            with urlopen(req, timeout=30) as resposta:
+                releases = json.load(resposta)
+            if not isinstance(releases, list):
+                raise ValueError("A lista de releases recebida é inválida.")
+            tag, url = escolher_release(releases, sys_tags())
+            print(f"Instalando a release compatível {tag}.")
         pipx = shutil.which("pipx")
         comando = [pipx, "install", "--force", url] if pipx else [sys.executable, "-m", "pip", "install", "--user", "--upgrade", url]
         subprocess.run(comando, check=True)

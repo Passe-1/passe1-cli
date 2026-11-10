@@ -23,6 +23,10 @@ def test_interface_configurada_sem_expor_chave(tmp_path, monkeypatch, capsys):
     config = json.loads(env['OPENCODE_CONFIG_CONTENT'])
     assert config['enabled_providers'] == ['passe1']
     assert config['permission']['edit'] == config['permission']['bash'] == 'ask'
+    assert config['permission']['webfetch'] == config['permission']['websearch'] == 'ask'
+    assert config['permission']['read']['*.env*'] == 'ask'
+    assert config['permission']['read']['*id_rsa*'] == 'ask'
+    assert config['permission']['read']['*service-account*'] == 'ask'
     assert 'PASSE1_API_KEY' not in env
     auth = tmp_path / 'opencode' / 'data' / 'opencode' / 'auth.json'
     assert json.loads(auth.read_text())['passe1']['key'] == 'sk-passe1-ficticia'
@@ -101,3 +105,46 @@ def test_logout_apaga_chave_mesmo_se_motor_falhar(tmp_path, monkeypatch):
     with patch.object(launcher, 'limpar_credencial', side_effect=OSError('falha')):
         assert passe1.main(['logout']) == 1
     assert not (tmp_path / 'key').exists()
+
+
+def test_agent_interativo_sem_opcoes_abre_a_mesma_tui(monkeypatch):
+    import passe1
+    monkeypatch.setattr(passe1, '_ler_chave', lambda *args: 'sk-passe1-ficticia')
+    monkeypatch.setattr(passe1.sys.stdin, 'isatty', lambda: True)
+    monkeypatch.setattr(passe1.sys.stdout, 'isatty', lambda: True)
+    with patch.object(launcher, 'iniciar', return_value=0) as iniciar:
+        assert passe1.main(['agent']) == 0
+        iniciar.assert_called_once_with([])
+
+
+def test_agente_legado_com_imagem_e_sessao_cria_titulo_no_motor(tmp_path, monkeypatch):
+    import argparse
+    import subprocess
+    imagem = tmp_path / 'imagem.png'
+    imagem.write_bytes(b'\x89PNG\r\n\x1a\nconteudo')
+    monkeypatch.chdir(tmp_path)
+    args = argparse.Namespace(base_url=None, model='glm-5.3-flash', session='projeto', sandbox=False, image=[str(imagem)], tarefa=['analise'])
+    capturado = {}
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={'glm-5.3-flash': {'name': 'modelo'}}), \
+         patch.object(launcher.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, '[]', '')), \
+         patch.object(launcher.os, 'execvpe', side_effect=lambda b, a, e: capturado.update(args=a)):
+        launcher.iniciar([], agente=args)
+    assert '--title' in capturado['args']
+    assert capturado['args'][capturado['args'].index('--file') + 1] == str(imagem)
+    assert capturado['args'][-1] == 'analise'
+
+
+def test_agente_legado_recusa_sandbox_nao_suportado(tmp_path, capsys):
+    import argparse
+    args = argparse.Namespace(base_url=None, model=None, session=None, sandbox=True, image=None, tarefa=['teste'])
+    with patch.object(launcher.Path, 'is_file', return_value=True), \
+         patch.object(launcher.passe1, '_ler_chave', return_value='sk-passe1-ficticia'), \
+         patch.object(launcher.passe1, '_dir_config', return_value=tmp_path), \
+         patch.object(launcher, '_catalogo', return_value={}), \
+         patch.object(launcher.os, 'execvpe') as executar:
+        assert launcher.iniciar([], agente=args) == 1
+        executar.assert_not_called()
+    assert 'macOS' in capsys.readouterr().out

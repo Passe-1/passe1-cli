@@ -1002,6 +1002,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
 def cmd_agent(args: argparse.Namespace) -> int:
     import agente
 
+    if os.name == "nt":
+        from passe1_engine.launcher import iniciar
+        return iniciar([], agente=args)
+    if (not args.tarefa and not args.model and not args.session and not args.sandbox and not args.image and not args.base_url
+            and sys.stdin.isatty() and sys.stdout.isatty()):
+        from passe1_engine.launcher import iniciar
+        return iniciar([])
     chave = _ler_chave(_base_url(args.base_url))
     if chave is None:
         return _sem_login()
