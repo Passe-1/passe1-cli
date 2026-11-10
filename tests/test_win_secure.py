@@ -355,3 +355,42 @@ def test_limpeza_do_journal_nao_apaga_arquivo_substituido(tmp_path, monkeypatch)
         win_secure._apagar_journal(journal, identidade)
     assert journal.read_text(encoding='utf-8') == 'arquivo de terceiro'
     assert anterior.exists()
+
+
+def test_recuperacao_recusa_arquivo_substituido(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+    monkeypatch.setenv('PASSE1_CONFIG_DIR', str(tmp_path / 'config'))
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('conteúdo original', encoding='utf-8')
+    programa = '''
+import os, sys
+from passe1_engine import win_secure as w
+original = w._gravar_handle
+def interromper(kernel, handle, texto):
+    original(kernel, handle, 'parcial')
+    os._exit(91)
+w._gravar_handle = interromper
+w.substituir(sys.argv[1], 'conteúdo original', 'novo')
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(alvo)], check=False, timeout=20)
+    assert resultado.returncode == 91
+    novo = tmp_path / 'terceiro.txt'
+    novo.write_text('arquivo de terceiro', encoding='utf-8')
+    os.replace(novo, alvo)
+    with pytest.raises(ValueError, match='não corresponde'):
+        win_secure.recuperar(alvo)
+    assert alvo.read_text(encoding='utf-8') == 'arquivo de terceiro'
+    assert win_secure._journal_path(alvo).exists()
+
+
+def test_edicao_acima_do_limite_preserva_original(tmp_path, monkeypatch):
+    from passe1_engine import win_secure
+    monkeypatch.setattr(win_secure, 'LIMITE_EDICAO', 3)
+    alvo = tmp_path / 'arquivo.txt'
+    alvo.write_text('antes', encoding='utf-8')
+    with pytest.raises(ValueError, match='limite'):
+        win_secure.substituir(alvo, 'antes', 'x')
+    assert alvo.read_text(encoding='utf-8') == 'antes'

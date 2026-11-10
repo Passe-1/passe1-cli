@@ -7,6 +7,8 @@ import os
 import stat
 from pathlib import Path
 
+LIMITE_EDICAO = 64 * 1024 * 1024
+
 
 def _dpapi(dados: bytes, proteger: bool) -> bytes:
     """Cifra journal para o usuário atual, sem gravar dados sensíveis em claro."""
@@ -163,6 +165,8 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
     from ctypes import wintypes
 
     alvo = Path(os.path.abspath(caminho))
+    if conteudo is not None and anterior is not None and len(conteudo.encode("utf-8")) > LIMITE_EDICAO:
+        raise ValueError("Conteúdo de edição excede o limite de 64 MiB.")
     partes = alvo.parts
     if not alvo.is_absolute() or len(partes) < 2 or any(p in (".", "..") or ":" in p or p.endswith((" ", ".")) for p in partes[1:]):
         raise ValueError("Caminho inválido.")
@@ -227,6 +231,7 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
         arquivo = relativo(pai, partes[-1], False, remover_alvo=anterior is not None)
         if anterior is not None:
             partes_lidas = []
+            tamanho_lido = 0
             while True:
                 buffer = ctypes.create_string_buffer(65536)
                 lidos = wintypes.DWORD()
@@ -234,6 +239,9 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None):
                     raise ctypes.WinError(ctypes.get_last_error())
                 if not lidos.value:
                     break
+                tamanho_lido += lidos.value
+                if tamanho_lido > LIMITE_EDICAO:
+                    raise ValueError("Arquivo excede o limite de operação de 64 MiB.")
                 partes_lidas.append(buffer.raw[:lidos.value])
             if recuperacao is None and b''.join(partes_lidas).decode('utf-8') != anterior:
                 raise ValueError("O arquivo mudou após a aprovação.")
