@@ -463,7 +463,9 @@ def test_multiplas_criacoes_em_pasta_nova_usam_identidade_atualizada(tmp_path):
     assert segundo.read_text(encoding='utf-8') == 'dois'
 
 
-def test_leitura_aceita_editor_aberto_e_impede_escrita_concorrente(tmp_path):
+
+
+def test_leitura_recusa_editor_com_handle_de_escrita(tmp_path):
     import ctypes
     from ctypes import wintypes
 
@@ -472,17 +474,30 @@ def test_leitura_aceita_editor_aberto_e_impede_escrita_concorrente(tmp_path):
     kernel.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
-    kernel.WriteFile.argtypes = [wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
     alvo = tmp_path / 'aberto.txt'
     alvo.write_text('original', encoding='utf-8')
     editor = kernel.CreateFileW(str(alvo), 0x40000000, 7, None, 3, 0, None)
     assert editor != wintypes.HANDLE(-1).value
     try:
-        with win_secure.abrir_leitura(alvo) as (fd, _):
-            assert os.read(fd, 100) == b'original'
-            dados = ctypes.create_string_buffer(b'x')
-            escritos = wintypes.DWORD()
-            assert not kernel.WriteFile(editor, dados, 1, ctypes.byref(escritos), None)
+        with pytest.raises(OSError, match='salve e feche'), win_secure.abrir_leitura(alvo):
+            pass
     finally:
         kernel.CloseHandle(editor)
+    assert alvo.read_text(encoding='utf-8') == 'original'
+
+
+def test_leitura_recusa_arquivo_com_mapeamento_de_escrita(tmp_path):
+    import mmap
+
+    from passe1_engine import win_secure
+    alvo = tmp_path / 'mapeado.txt'
+    alvo.write_text('original', encoding='utf-8')
+    arquivo = alvo.open('r+b')
+    mapa = mmap.mmap(arquivo.fileno(), 0, access=mmap.ACCESS_WRITE)
+    arquivo.close()
+    try:
+        with pytest.raises(OSError, match='salve e feche'), win_secure.abrir_leitura(alvo):
+            pass
+    finally:
+        mapa.close()
     assert alvo.read_text(encoding='utf-8') == 'original'

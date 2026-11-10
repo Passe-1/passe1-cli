@@ -256,9 +256,6 @@ def abrir_leitura(caminho):
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(Info)]
-    class Overlapped(ctypes.Structure):
-        _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t), ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
-    kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
     ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatus), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
     ntdll.NtCreateFile.restype = ctypes.c_long
     root = kernel.CreateFileW(partes[0], 0x100081, 3, None, 3, 0x02200000, None)
@@ -284,18 +281,16 @@ def abrir_leitura(caminho):
             attrs = ObjectAttributes(ctypes.sizeof(ObjectAttributes), pai, ctypes.pointer(nome), 0x40 | 0x1000, None, None)
             novo, ios = wintypes.HANDLE(), IoStatus()
             acesso = 0x100081 if diretorio else 0x80100080
-            status = ntdll.NtCreateFile(ctypes.byref(novo), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3, 1, 0x00200020 | (1 if diretorio else 0x40), None, 0)
+            status = ntdll.NtCreateFile(ctypes.byref(novo), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3 if diretorio else 1, 1, 0x00200020 | (1 if diretorio else 0x40), None, 0)
             if status < 0:
+                if not diretorio and status & 0xffffffff == 0xc0000043:
+                    raise OSError("Arquivo em uso para escrita; salve e feche o editor antes de tentar novamente.")
                 raise OSError(f"NtCreateFile falhou: 0x{status & 0xffffffff:08x}")
             handles.append(novo.value)
             identidade = info(novo.value, diretorio)
             if diretorio:
                 pais.append(identidade)
                 pai = novo.value
-            else:
-                bloqueio = Overlapped()
-                if not kernel.LockFileEx(novo.value, 3, 0, 0xffffffff, 0xffffffff, ctypes.byref(bloqueio)):
-                    raise OSError("Arquivo em uso para escrita; tente novamente.")
         fd = msvcrt.open_osfhandle(handles[-1], os.O_RDONLY | os.O_BINARY)
         handles.pop()
         yield fd, {"pais": pais, "arquivo": identidade}
