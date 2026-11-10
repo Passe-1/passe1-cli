@@ -25,7 +25,6 @@ with segurar(raiz, timeout=300):
     versao = subprocess.check_output(["bun", "--version"], text=True).strip()
     if versao != bun_exigido:
         raise SystemExit(f"Bun {bun_exigido} é necessário; instalado: {versao}.")
-    subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=fonte, check=True)
     match = re.search(r'^VERSAO = "([^"]+)"', (raiz / "passe1.py").read_text(encoding="utf-8"), re.MULTILINE)
     if not match:
         raise SystemExit("Versão do Passe1 não encontrada.")
@@ -42,6 +41,15 @@ with segurar(raiz, timeout=300):
     subprocess.run(["git", "apply", "--check", str(patch)], cwd=fonte, check=True)
     subprocess.run(["git", "apply", str(patch)], cwd=fonte, check=True)
     try:
+        subprocess.run(["bun", "install", "--frozen-lockfile"], cwd=fonte, check=True)
+        if (sistema, arquitetura) == ("windows", "arm64"):
+            teste_pty = '''import { spawn } from "bun-pty";
+const pty = spawn("cmd.exe", ["/d", "/c", "echo PASSE1_PTY_OK"], { cols: 80, rows: 24, cwd: process.cwd(), env: process.env });
+let saida = "";
+const timer = setTimeout(() => { pty.kill(); process.exit(1); }, 15000);
+pty.onData((s) => { saida += s; });
+pty.onExit((e) => { clearTimeout(timer); if (e.exitCode !== 0 || !saida.includes("PASSE1_PTY_OK")) process.exit(1); });'''
+            subprocess.run(["bun", "-e", teste_pty], cwd=fonte / "packages" / "core", check=True, timeout=30)
         subprocess.run(["bun", "test", "test/tool/shell.test.ts", "-t", "streams metadata updates progressively", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         subprocess.run(["bun", "test", "test/tool/read.test.ts", "test/tool/shell.test.ts", "test/tool/grep.test.ts", "test/tool/write.test.ts", "test/tool/edit.test.ts", "test/tool/apply_patch.test.ts", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)
         subprocess.run(["bun", "test", "test/session/prompt.test.ts", "-t", "sandbox protege shell direto", "--timeout", "30000"], cwd=projeto, check=True, env=ambiente)

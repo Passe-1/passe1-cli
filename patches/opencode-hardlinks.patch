@@ -1796,3 +1796,38 @@ index 9a528f2f..018f59a9 100644
    agent?: string
    prompt?: string
    continue?: boolean
+diff --git a/bun.lock b/bun.lock
+index 481ef0a6..53f21575 100644
+--- a/bun.lock
++++ b/bun.lock
+@@ -335,7 +335,7 @@
+         "@parcel/watcher": "2.5.1",
+         "@silvia-odwyer/photon-node": "0.3.4",
+         "ai-gateway-provider": "3.2.0",
+-        "bun-pty": "0.4.8",
++        "bun-pty": "0.4.11",
+         "cross-spawn": "catalog:",
+         "diff": "catalog:",
+         "drizzle-orm": "catalog:",
+@@ -3238,7 +3238,7 @@
+ 
+     "bun-ffi-structs": ["bun-ffi-structs@0.2.4", "", { "peerDependencies": { "typescript": "^5" } }, "sha512-AJzsqoVFs1KBbJbWHIYrVZLDC3NhTqqh25awRXqzoLzmBAKr5oqk6+CwuYHAekKx+VBCYVohBoKuRq40dV+TYg=="],
+ 
+-    "bun-pty": ["bun-pty@0.4.8", "", {}, "sha512-rO70Mrbr13+jxHHHu2YBkk2pNqrJE5cJn29WE++PUr+GFA0hq/VgtQPZANJ8dJo6d7XImvBk37Innt8GM7O28w=="],
++    "bun-pty": ["bun-pty@0.4.11", "", {}, "sha512-DpBfXCoWbcDziqL4gT3sFw/O6vfe2Gm1LmsnjfGjpqNhmsPjBcVorTrRv7OVATsy88PiXfn486vp0w4x3/Q84g=="],
+ 
+     "bun-types": ["bun-types@1.3.13", "", { "dependencies": { "@types/node": "*" } }, "sha512-QXKeHLlOLqQX9LgYaHJfzdBaV21T63HhFJnvuRCcjZiaUDpbs5ED1MgxbMra71CsryN/1dAoXuJJJwIv/2drVA=="],
+ 
+diff --git a/packages/core/package.json b/packages/core/package.json
+index 4a1ea279..ee4e56ef 100644
+--- a/packages/core/package.json
++++ b/packages/core/package.json
+@@ -102,7 +102,7 @@
+     "@silvia-odwyer/photon-node": "0.3.4",
+     "@openrouter/ai-sdk-provider": "2.9.0",
+     "ai-gateway-provider": "3.2.0",
+-    "bun-pty": "0.4.8",
++    "bun-pty": "0.4.11",
+     "cross-spawn": "catalog:",
+     "diff": "catalog:",
+     "drizzle-orm": "catalog:",
