@@ -141,3 +141,11 @@ As credenciais locais no Windows usam permissões restritas à conta atual. Se u
 Movimentações com `apply_patch` usam journal e guardam cópias em quarentena. Se uma operação for interrompida, use `passe1 recover-move CAMINHO_DO_JOURNAL` em um terminal para revisar o diff sanitizado e confirmar a recuperação. As cópias e o journal permanecem após a operação; a revisão integral recusa conteúdo acima de 1 MiB. No Windows, se a interrupção ocorrer antes do registro da identidade do arquivo temporário, o CLI preserva esse arquivo e informa seu caminho para inspeção e limpeza manual. O journal não garante proteção contra processos maliciosos do mesmo usuário, e um pseudoterminal não comprova presença humana.
 
 O build do motor adquire automaticamente a trava cooperativa do submódulo. Para aplicar ou reverter patches manualmente, execute toda a sequência sob `python scripts/vendor_lock.py -- <comando>`; não execute operações Git diretas em `vendor/opencode` em paralelo com o build.
+
+### Colagem e anexos na interface
+
+Cole texto multilinha no prompt e pressione Enter para enviar. Ctrl+J, Ctrl+O ou uma barra invertida seguida de Enter inserem nova linha. Setas para cima e para baixo recuperam entradas anteriores; Tab completa comandos e caminhos em `/anexar` e `/imagem`.
+
+Cole ou arraste o caminho de um arquivo para prepará-lo, ou use `/anexar CAMINHO`. `/anexos` lista a seleção e `/remover N` remove um item. Ctrl+V ou Alt+V tenta anexar uma imagem da área de transferência quando houver uma ferramenta nativa disponível; a colagem de texto segue o atalho do terminal. Arquivos potencialmente sensíveis exigem confirmação explícita antes da leitura.
+
+São aceitos textos UTF-8 até 256 KiB e imagens PNG, JPEG, GIF ou WebP, com limite total de 4 MiB por envio. Arquivos remotos e links são recusados. Clipboard de imagem depende do suporte do sistema e das ferramentas disponíveis; a interface informa quando não há imagem ou ferramenta compatível.
