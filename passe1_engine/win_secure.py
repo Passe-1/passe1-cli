@@ -256,6 +256,9 @@ def abrir_leitura(caminho):
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(Info)]
+    class Overlapped(ctypes.Structure):
+        _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t), ("Offset", wintypes.DWORD), ("OffsetHigh", wintypes.DWORD), ("hEvent", wintypes.HANDLE)]
+    kernel.LockFileEx.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(Overlapped)]
     ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(ObjectAttributes), ctypes.POINTER(IoStatus), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
     ntdll.NtCreateFile.restype = ctypes.c_long
     root = kernel.CreateFileW(partes[0], 0x100081, 3, None, 3, 0x02200000, None)
@@ -281,7 +284,7 @@ def abrir_leitura(caminho):
             attrs = ObjectAttributes(ctypes.sizeof(ObjectAttributes), pai, ctypes.pointer(nome), 0x40 | 0x1000, None, None)
             novo, ios = wintypes.HANDLE(), IoStatus()
             acesso = 0x100081 if diretorio else 0x80100080
-            status = ntdll.NtCreateFile(ctypes.byref(novo), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3 if diretorio else 1, 1, 0x00200020 | (1 if diretorio else 0x40), None, 0)
+            status = ntdll.NtCreateFile(ctypes.byref(novo), acesso, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 3, 1, 0x00200020 | (1 if diretorio else 0x40), None, 0)
             if status < 0:
                 raise OSError(f"NtCreateFile falhou: 0x{status & 0xffffffff:08x}")
             handles.append(novo.value)
@@ -289,6 +292,10 @@ def abrir_leitura(caminho):
             if diretorio:
                 pais.append(identidade)
                 pai = novo.value
+            else:
+                bloqueio = Overlapped()
+                if not kernel.LockFileEx(novo.value, 3, 0, 0xffffffff, 0xffffffff, ctypes.byref(bloqueio)):
+                    raise OSError("Arquivo em uso para escrita; tente novamente.")
         fd = msvcrt.open_osfhandle(handles[-1], os.O_RDONLY | os.O_BINARY)
         handles.pop()
         yield fd, {"pais": pais, "arquivo": identidade}
@@ -424,7 +431,11 @@ def _operar(caminho, anterior, conteudo, recuperacao=None, journal_id=None, iden
             if criando and len(pais) >= len(esperados):
                 # O componente estava ausente no preview: FILE_CREATE impede
                 # adotar um diretório inserido por outro processo.
-                if len(pais_handles) == 1:
+                if pai in criadas:
+                    # O próprio handle criado já tem FILE_ADD_SUBDIRECTORY;
+                    # reabri-lo conflitaria com seu acesso DELETE exclusivo.
+                    pai_criacao = pai
+                elif len(pais_handles) == 1:
                     pai_criacao = kernel.CreateFileW(partes[0], 0x100085, 3, None, 3, 0x02200000, None)
                     if pai_criacao == wintypes.HANDLE(-1).value:
                         raise ctypes.WinError(ctypes.get_last_error())
