@@ -346,7 +346,7 @@ def _renomear_handle(fd, diretorio, nome):
 
 
 @contextmanager
-def _preparar_arquivo_temporario(destino, pais_aprovados):
+def _preparar_arquivo_temporario(destino, pais_aprovados, *, _nome=None, _descartar_ao_fechar=True):
     """Experimento para destino ausente: temporário some ao fechar seu handle.
 
     Não publica o arquivo nem cria diretórios; não integra o fluxo de move.
@@ -368,7 +368,9 @@ def _preparar_arquivo_temporario(destino, pais_aprovados):
     ntdll = ctypes.WinDLL('ntdll')
     ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
     ntdll.NtCreateFile.restype = ctypes.c_long
-    nome = 'passe1-stage-' + secrets.token_hex(16)
+    nome = _nome or 'passe1-stage-' + secrets.token_hex(16)
+    if not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome):
+        raise ValueError('Nome de temporário inválido.')
     with _ancorar_journal(caminho.parent):
         if snapshot_pais(caminho)['pais'] != pais_aprovados:
             raise ValueError('Diretório mudou após a aprovação.')
@@ -387,7 +389,8 @@ def _preparar_arquivo_temporario(destino, pais_aprovados):
             palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
             atributos = _Attributes(ctypes.sizeof(_Attributes), pai, ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
             handle, ios = wintypes.HANDLE(), _Io()
-            status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110180, ctypes.byref(atributos), ctypes.byref(ios), None, 0, 0, 2, 0x00201060, None, 0)
+            opcoes = 0x00200060 | (0x1000 if _descartar_ao_fechar else 0)
+            status = ntdll.NtCreateFile(ctypes.byref(handle), 0xC0110180, ctypes.byref(atributos), ctypes.byref(ios), None, 0, 0, 2, opcoes, None, 0)
             if status < 0:
                 raise OSError(f'NtCreateFile do temporário falhou: 0x{status & 0xffffffff:08x}')
             try:
@@ -407,6 +410,31 @@ def _preparar_arquivo_temporario(destino, pais_aprovados):
                     kernel.CloseHandle(handle)
         finally:
             kernel.CloseHandle(pai)
+
+
+@contextmanager
+def _preparar_stage_registrado(journal):
+    """Cria etapa persistente somente após fixar journal com nome aprovado.
+
+    No encerramento normal, grava segundo registro cifrado e sincronizado
+    com a identidade e hash do stage antes de fechar o handle. Não publica.
+    """
+    with _abrir_plano_fixo(journal) as (arquivo, id_journal, plano):
+        nome = plano.get('stage')
+        if plano.get('destino_ausente') is not True or not isinstance(nome, str) or not re.fullmatch(r'passe1-stage-[0-9a-f]{32}', nome):
+            raise ValueError('Plano de destino ausente inválido.')
+        with _preparar_arquivo_temporario(plano['destino'], plano['pais_destino'], _nome=nome, _descartar_ao_fechar=False) as resultado:
+            yield resultado
+            fd, _pai, _nome, id_stage = resultado
+            if not hmac.compare_digest(hashlib.sha256(_conteudo_handle(fd)).hexdigest(), plano['hash_novo']):
+                raise ValueError('Conteúdo do stage divergiu do plano aprovado.')
+            registro = {
+                'versao': 1, 'journal': list(id_journal), 'stage': nome,
+                'id_stage': id_stage, 'pais_destino': plano['pais_destino'],
+                'hash_novo': plano['hash_novo'],
+                'hash_plano': hashlib.sha256(json.dumps(plano, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest(),
+            }
+            _guardar_journal_ancorado(Path(str(arquivo) + '.stage'), plano['destino'], json.dumps(registro, ensure_ascii=False), id_stage)
 
 
 def _mover_experimental(origem, destino, anterior_origem, anterior_destino, novo, identidade_origem, identidade_destino, journal_root):

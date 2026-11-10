@@ -1,5 +1,6 @@
 """Verificação dos estados do protocolo experimental Windows."""
 import os
+from pathlib import Path
 
 import pytest
 
@@ -336,6 +337,83 @@ with win_move._preparar_arquivo_temporario(destino, pais) as (fd, _, _, _):
     assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
     assert not list(tmp_path.glob('passe1-stage-*'))
     assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+def test_stage_persistente_exige_journal_previo_e_nao_sobrescreve(tmp_path):
+    import json
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino-novo.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+        'stage': 'passe1-stage-' + 'a' * 32,
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        pass
+    assert journal.exists()
+    with win_move._preparar_stage_registrado(journal) as (fd, _pai, nome, identidade):
+        assert identidade and nome == plano['stage']
+        win_move._gravar_handle(fd, b'novo')
+    with pytest.raises(OSError), win_move._preparar_stage_registrado(journal):
+        pytest.fail('Não deve sobrescrever stage já existente.')
+    registro = json.loads(win_secure._ler_journal(str(journal) + '.stage')['conteudo'])
+    assert registro['id_stage'] == identidade and registro['stage'] == nome
+    assert registro['hash_novo'] == win_move._digest('novo')
+    assert (tmp_path / nome).read_bytes() == b'novo'
+    assert origem.read_text(encoding='utf-8') == 'origem'
+    assert not destino.exists()
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
+@pytest.mark.parametrize('fase', ['antes-registro', 'apos-registro'])
+def test_queda_durante_preparacao_de_stage_preserva_origem(tmp_path, fase):
+    import json
+    import subprocess
+    import sys
+
+    from passe1_engine import win_secure
+
+    origem, destino = tmp_path / 'origem.txt', tmp_path / 'destino-novo.txt'
+    origem.write_text('origem', encoding='utf-8')
+    vo = win_secure.snapshot(origem)['identidade']
+    plano = {
+        'versao': 1, 'origem': str(origem), 'destino': str(destino),
+        'id_origem': vo['arquivo'], 'id_destino': None,
+        'pais_origem': vo['pais'], 'pais_destino': win_secure.snapshot_pais(destino)['pais'],
+        'destino_ausente': True, 'conteudo_destino': None, 'hash_destino': None,
+        'conteudo_origem': 'origem', 'hash_origem': win_move._digest('origem'),
+        'conteudo_novo': 'novo', 'hash_novo': win_move._digest('novo'),
+        'stage': 'passe1-stage-' + 'b' * 32,
+    }
+    with win_move._journal_fixo(tmp_path, plano) as (journal, _identidade):
+        pass
+    programa = '''
+import os, sys
+from passe1_engine import win_move
+journal, fase = sys.argv[1:]
+with win_move._preparar_stage_registrado(journal) as (fd, _, _, _):
+    win_move._gravar_handle(fd, b'novo')
+    if fase == 'antes-registro':
+        os._exit(91)
+os._exit(91)
+'''
+    resultado = subprocess.run([sys.executable, '-c', programa, str(journal), fase], capture_output=True, timeout=60, check=False)
+    assert resultado.returncode == 91, resultado.stderr.decode('utf-8', errors='replace')[-1000:]
+    assert origem.read_text(encoding='utf-8') == 'origem' and not destino.exists()
+    assert (tmp_path / plano['stage']).read_bytes() == b'novo'
+    registro = Path(str(journal) + '.stage')
+    assert registro.exists() == (fase == 'apos-registro')
+    if registro.exists():
+        assert json.loads(win_secure._ler_journal(registro)['conteudo'])['stage'] == plano['stage']
 
 
 @pytest.mark.skipif(os.name != 'nt', reason='requer handles do Windows')
