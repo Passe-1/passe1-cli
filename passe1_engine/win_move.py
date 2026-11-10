@@ -203,7 +203,7 @@ def _par_fixo(origem, destino, plano):
     import msvcrt
     from ctypes import wintypes
 
-    from passe1_engine.win_private import _Info
+    from passe1_engine.win_private import _Attributes, _Info, _Io, _Unicode
 
     plano = _validar_journal(plano)
     caminhos = (Path(os.path.abspath(origem)), Path(os.path.abspath(destino)))
@@ -214,17 +214,38 @@ def _par_fixo(origem, destino, plano):
     kernel.CreateFileW.restype = wintypes.HANDLE
     kernel.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.POINTER(_Info)]
     kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    ntdll = ctypes.WinDLL('ntdll')
+    ntdll.NtCreateFile.argtypes = [ctypes.POINTER(wintypes.HANDLE), wintypes.ULONG, ctypes.POINTER(_Attributes), ctypes.POINTER(_Io), ctypes.c_void_p, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, wintypes.ULONG, ctypes.c_void_p, wintypes.ULONG]
+    ntdll.NtCreateFile.restype = ctypes.c_long
     descritores = {}
+    diretorios = {}
     with ExitStack() as pilha:
         for pai in sorted({c.parent for c in caminhos}, key=lambda p: os.path.normcase(str(p))):
             pilha.enter_context(_ancorar_journal(pai))
         for nome, caminho in zip(('origem', 'destino'), caminhos, strict=True):
             if snapshot_pais(caminho)['pais'] != plano['pais_' + nome]:
                 raise ValueError('Diretório mudou após a aprovação.')
-        for nome, caminho in sorted(zip(('origem', 'destino'), caminhos, strict=True), key=lambda par: os.path.normcase(str(par[1]))):
-            handle = kernel.CreateFileW(str(caminho), 0xC0010080, 0, None, 3, 0x00200000, None)
-            if handle == wintypes.HANDLE(-1).value:
+            pai = kernel.CreateFileW(str(caminho.parent), 0x100084, 3, None, 3, 0x02200000, None)
+            if pai == wintypes.HANDLE(-1).value:
                 raise ctypes.WinError(ctypes.get_last_error())
+            pilha.callback(kernel.CloseHandle, pai)
+            informacao_pai = _Info()
+            if not kernel.GetFileInformationByHandle(pai, ctypes.byref(informacao_pai)):
+                raise ctypes.WinError(ctypes.get_last_error())
+            id_pai = [str(informacao_pai.volume), str(informacao_pai.index_high), str(informacao_pai.index_low)]
+            if informacao_pai.attributes & 0x400 or not informacao_pai.attributes & 0x10 or id_pai != plano['pais_' + nome][-1]:
+                raise ValueError('Diretório mudou após a aprovação.')
+            diretorios[nome] = pai
+        for nome, caminho in sorted(zip(('origem', 'destino'), caminhos, strict=True), key=lambda par: os.path.normcase(str(par[1]))):
+            buffer = ctypes.create_unicode_buffer(caminho.name)
+            tamanho = len(caminho.name.encode('utf-16-le'))
+            palavra = _Unicode(tamanho, tamanho + 2, ctypes.cast(buffer, wintypes.LPWSTR))
+            attrs = _Attributes(ctypes.sizeof(_Attributes), diretorios[nome], ctypes.pointer(palavra), 0x40 | 0x1000, None, None)
+            resultado, ios = wintypes.HANDLE(), _Io()
+            status = ntdll.NtCreateFile(ctypes.byref(resultado), 0xC0110080, ctypes.byref(attrs), ctypes.byref(ios), None, 0, 0, 1, 0x00200060, None, 0)
+            if status < 0:
+                raise OSError(f'NtCreateFile do arquivo falhou: 0x{status & 0xffffffff:08x}')
+            handle = resultado.value
             try:
                 informacao = _Info()
                 if not kernel.GetFileInformationByHandle(handle, ctypes.byref(informacao)):
@@ -251,7 +272,7 @@ def _par_fixo(origem, destino, plano):
         for nome, caminho in zip(('origem', 'destino'), caminhos, strict=True):
             if snapshot_pais(caminho)['pais'] != plano['pais_' + nome]:
                 raise ValueError('Diretório mudou durante a preparação.')
-        yield descritores
+        yield descritores, diretorios
 
 
 def _renomear_handle(fd, diretorio, nome):

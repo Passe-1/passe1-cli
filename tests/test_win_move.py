@@ -190,8 +190,9 @@ def test_par_fixo_confere_identidades_e_impede_trocas(tmp_path):
     for nome, texto in [('origem', 'origem'), ('destino', 'destino'), ('novo', 'novo')]:
         plano['conteudo_' + nome] = texto
         plano['hash_' + nome] = win_move._digest(texto)
-    with win_move._par_fixo(origem, destino, plano) as descritores:
+    with win_move._par_fixo(origem, destino, plano) as (descritores, diretorios):
         assert set(descritores) == {'origem', 'destino'}
+        assert set(diretorios) == {'origem', 'destino'}
         with pytest.raises(OSError):
             os.rename(origem, origem.with_name('movido'))
         with pytest.raises(OSError):
